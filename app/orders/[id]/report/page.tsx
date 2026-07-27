@@ -1,0 +1,235 @@
+"use client";
+
+import { Fragment, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { client } from "@/lib/amplify";
+import type { Schema } from "@/amplify/data/resource";
+import {
+  DEPARTMENT_LABEL,
+  FLAG_META,
+  SEX_LABEL,
+  ageLabel,
+  fmtDateTime,
+  isCritical,
+  type Flag,
+} from "@/lib/lab";
+
+type Order = Schema["Order"]["type"];
+type Patient = Schema["Patient"]["type"];
+type Item = Schema["OrderItem"]["type"];
+
+const LAB = {
+  name: "مختبر النور الطبي",
+  subtitle: "Al-Noor Medical Laboratory",
+  license: "ترخيص وزارة الصحة رقم 1234/م",
+  contact: "الرياض — هاتف 0112345678",
+};
+
+export default function ReportPage({ params }: { params: { id: string } }) {
+  const [order, setOrder] = useState<Order | null>(null);
+  const [patient, setPatient] = useState<Patient | null>(null);
+  const [items, setItems] = useState<Item[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      const { data: o } = await client.models.Order.get({ id: params.id });
+      if (!o) {
+        setLoading(false);
+        return;
+      }
+      setOrder(o);
+      const [{ data: p }, { data: its }] = await Promise.all([
+        client.models.Patient.get({ id: o.patientId }),
+        client.models.OrderItem.list({
+          limit: 500,
+          filter: { orderId: { eq: o.id } },
+        }),
+      ]);
+      setPatient(p ?? null);
+      setItems(
+        (its ?? []).sort((a, b) => (a.sortOrder ?? 100) - (b.sortOrder ?? 100))
+      );
+      setLoading(false);
+    })().catch(() => setLoading(false));
+  }, [params.id]);
+
+  const grouped = useMemo<[string, Item[]][]>(() => {
+    const map = new Map<string, Item[]>();
+    items
+      .filter((i) => i.valueNumeric != null || i.valueText)
+      .forEach((i) => {
+        const k = i.department ?? "OTHER";
+        map.set(k, [...(map.get(k) ?? []), i]);
+      });
+    return Array.from(map.entries());
+  }, [items]);
+
+  if (loading) return <p className="muted">جارٍ التحميل…</p>;
+  if (!order || !patient)
+    return (
+      <div className="empty">
+        <span className="icon">🔍</span>
+        التقرير غير متاح.
+      </div>
+    );
+
+  const isApproved = order.status === "APPROVED" || order.status === "DELIVERED";
+
+  return (
+    <>
+      <div className="row no-print" style={{ marginBottom: 16 }}>
+        <Link href={`/orders/${order.id}`} className="btn">
+          ← رجوع للطلب
+        </Link>
+        <button className="btn primary" onClick={() => window.print()}>
+          🖨️ طباعة / حفظ PDF
+        </button>
+        {!isApproved && (
+          <span className="badge warn">
+            مسودّة — لم تُعتمد النتائج بعد، لا تُسلَّم للمريض
+          </span>
+        )}
+      </div>
+
+      <div className="report">
+        <div className="report-head">
+          <div>
+            <h1>{LAB.name}</h1>
+            <div className="muted small">{LAB.subtitle}</div>
+            <div className="muted small">{LAB.license}</div>
+          </div>
+          <div style={{ textAlign: "left" }}>
+            <div style={{ fontWeight: 800, fontSize: "1.05rem" }}>تقرير نتائج مختبرية</div>
+            <div className="mono small">{order.orderNo}</div>
+            <div className="muted small">{LAB.contact}</div>
+          </div>
+        </div>
+
+        {!isApproved && (
+          <div
+            style={{
+              border: "2px dashed #b91c1c",
+              color: "#b91c1c",
+              padding: "8px 12px",
+              borderRadius: 8,
+              marginBottom: 16,
+              fontWeight: 700,
+              textAlign: "center",
+            }}
+          >
+            مسودّة غير معتمدة — للاستخدام الداخلي فقط
+          </div>
+        )}
+
+        <div className="report-meta">
+          <div>
+            <div className="k">اسم المريض</div>
+            <div>{patient.fullName}</div>
+          </div>
+          <div>
+            <div className="k">رقم الملف</div>
+            <div className="mono">{patient.mrn}</div>
+          </div>
+          <div>
+            <div className="k">الجنس / العمر</div>
+            <div>
+              {SEX_LABEL[patient.sex ?? ""]} · {ageLabel(patient.birthDate)}
+            </div>
+          </div>
+          <div>
+            <div className="k">الطبيب المُحوِّل</div>
+            <div>{order.referringDoctor || "—"}</div>
+          </div>
+          <div>
+            <div className="k">تاريخ سحب العيّنة</div>
+            <div>{fmtDateTime(order.collectedAt ?? order.createdAt)}</div>
+          </div>
+          <div>
+            <div className="k">تاريخ إصدار التقرير</div>
+            <div>{fmtDateTime(order.approvedAt ?? new Date().toISOString())}</div>
+          </div>
+        </div>
+
+        {grouped.length === 0 ? (
+          <p className="muted">لا توجد نتائج مُدخلة بعد.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>الفحص</th>
+                <th>النتيجة</th>
+                <th>الوحدة</th>
+                <th>المدى المرجعي</th>
+                <th>الدلالة</th>
+              </tr>
+            </thead>
+            <tbody>
+              {grouped.map(([dept, list]) => (
+                <Fragment key={dept}>
+                  <tr className="dept-head">
+                    <td colSpan={5}>{DEPARTMENT_LABEL[dept] ?? dept}</td>
+                  </tr>
+                  {list.map((i) => {
+                    const flag = (i.flag ?? null) as Flag | null;
+                    const meta = flag ? FLAG_META[flag] : null;
+                    const abnormal = flag && flag !== "NORMAL";
+                    const value =
+                      i.valueNumeric != null ? String(i.valueNumeric) : i.valueText;
+                    return (
+                      <tr key={i.id}>
+                        <td>
+                          {i.testNameAr}
+                          {i.comment && (
+                            <div className="small muted">ملاحظة: {i.comment}</div>
+                          )}
+                        </td>
+                        <td>
+                          <span
+                            className={
+                              isCritical(flag)
+                                ? "val-crit"
+                                : abnormal
+                                ? "val-abn"
+                                : ""
+                            }
+                          >
+                            {value}
+                          </span>
+                        </td>
+                        <td>{i.unit || "—"}</td>
+                        <td>{i.refText || "—"}</td>
+                        <td>{meta && abnormal ? meta.label : "طبيعي"}</td>
+                      </tr>
+                    );
+                  })}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <div className="report-foot">
+          <div>
+            <div>اعتمد النتائج:</div>
+            <div style={{ fontWeight: 700, marginTop: 4 }}>
+              {order.approvedBy || "— بانتظار الاعتماد —"}
+            </div>
+            <div>{fmtDateTime(order.approvedAt)}</div>
+          </div>
+          <div style={{ textAlign: "left" }}>
+            <div>رمز التحقق</div>
+            <div className="mono" style={{ fontWeight: 700 }}>
+              {order.orderNo}
+            </div>
+          </div>
+        </div>
+
+        <div className="report-disclaimer">
+          هذه النتائج تخصّ العيّنة المذكورة أعلاه فقط ولا تُغني عن استشارة الطبيب
+          المعالج. أي قيمة خارج المدى المرجعي تُفسَّر ضمن الحالة السريرية للمريض.
+        </div>
+      </div>
+    </>
+  );
+}
