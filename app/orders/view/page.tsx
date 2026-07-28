@@ -1,7 +1,8 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { audit, client, listAll, useSession } from "@/lib/amplify";
 import type { Schema } from "@/amplify/data/resource";
 import {
@@ -25,7 +26,21 @@ type Item = Schema["OrderItem"]["type"];
 
 type Draft = { value: string; comment: string };
 
-export default function OrderPage({ params }: { params: { id: string } }) {
+/* المعرّف يأتي من `?id=` لا من مقطع مسار ديناميكي، لأن التطبيق يُصدَّر
+   كموقع ثابت (output: "export") ولا يستطيع Next توليد صفحة لكل طلب
+   وقت البناء — الطلبات تُنشأ بعد النشر. الصفحة كلها عميلة أصلًا
+   وتجلب بياناتها من AppSync، فلا خسارة وظيفية.                    */
+export default function Page() {
+  return (
+    <Suspense fallback={<p className="muted">جارٍ التحميل…</p>}>
+      <OrderPage />
+    </Suspense>
+  );
+}
+
+function OrderPage() {
+  const params = useSearchParams();
+  const orderId = params.get("id") ?? "";
   const session = useSession();
   const [order, setOrder] = useState<Order | null>(null);
   const [patient, setPatient] = useState<Patient | null>(null);
@@ -36,7 +51,11 @@ export default function OrderPage({ params }: { params: { id: string } }) {
   const [msg, setMsg] = useState("");
 
   const load = useCallback(async () => {
-    const { data: o } = await client.models.Order.get({ id: params.id });
+    if (!orderId) {
+      setLoading(false);
+      return;
+    }
+    const { data: o } = await client.models.Order.get({ id: orderId });
     if (!o) {
       setLoading(false);
       return;
@@ -74,7 +93,7 @@ export default function OrderPage({ params }: { params: { id: string } }) {
       )
     );
     setLoading(false);
-  }, [params.id]);
+  }, [orderId]);
 
   useEffect(() => {
     load().catch((e) => {
@@ -484,7 +503,7 @@ export default function OrderPage({ params }: { params: { id: string } }) {
             </button>
           )}
           {approved && (
-            <Link href={`/orders/${order.id}/report`} className="btn primary">
+            <Link href={`/orders/report?id=${order.id}`} className="btn primary">
               التقرير 🖨️
             </Link>
           )}

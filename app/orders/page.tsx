@@ -166,7 +166,7 @@ export default function OrdersPage() {
                         {fmtMoney((o.totalPrice ?? 0) - (o.discount ?? 0))}
                       </td>
                       <td className="nowrap">
-                        <Link href={`/orders/${o.id}`} className="btn sm">
+                        <Link href={`/orders/view?id=${o.id}`} className="btn sm">
                           فتح
                         </Link>
                       </td>

@@ -127,7 +127,7 @@ export default function Dashboard() {
           <ul style={{ margin: "8px 0 0", paddingInlineStart: 20, fontWeight: 400 }}>
             {criticals.slice(0, 8).map((c) => (
               <li key={c.id}>
-                <Link href={`/orders/${c.orderId}`}>
+                <Link href={`/orders/view?id=${c.orderId}`}>
                   {c.testNameAr}: {c.valueNumeric ?? c.valueText} {c.unit ?? ""} (
                   {FLAG_META[(c.flag ?? "ABNORMAL") as Flag].label})
                 </Link>
@@ -230,7 +230,7 @@ export default function Dashboard() {
                       </td>
                       <td className="num">{fmtMoney((o.totalPrice ?? 0) - (o.discount ?? 0))}</td>
                       <td>
-                        <Link href={`/orders/${o.id}`} className="btn sm">
+                        <Link href={`/orders/view?id=${o.id}`} className="btn sm">
                           فتح
                         </Link>
                       </td>

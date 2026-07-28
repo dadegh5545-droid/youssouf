@@ -1,7 +1,8 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { client, listAll } from "@/lib/amplify";
 import type { Schema } from "@/amplify/data/resource";
 import {
@@ -26,7 +27,17 @@ const LAB = {
   contact: "الرياض — هاتف 0112345678",
 };
 
-export default function ReportPage({ params }: { params: { id: string } }) {
+export default function Page() {
+  return (
+    <Suspense fallback={<p className="muted">جارٍ التحميل…</p>}>
+      <ReportPage />
+    </Suspense>
+  );
+}
+
+function ReportPage() {
+  const params = useSearchParams();
+  const orderId = params.get("id") ?? "";
   const [order, setOrder] = useState<Order | null>(null);
   const [patient, setPatient] = useState<Patient | null>(null);
   const [items, setItems] = useState<Item[]>([]);
@@ -34,7 +45,11 @@ export default function ReportPage({ params }: { params: { id: string } }) {
 
   useEffect(() => {
     (async () => {
-      const { data: o } = await client.models.Order.get({ id: params.id });
+      if (!orderId) {
+        setLoading(false);
+        return;
+      }
+      const { data: o } = await client.models.Order.get({ id: orderId });
       if (!o) {
         setLoading(false);
         return;
@@ -56,7 +71,7 @@ export default function ReportPage({ params }: { params: { id: string } }) {
       );
       setLoading(false);
     })().catch(() => setLoading(false));
-  }, [params.id]);
+  }, [orderId]);
 
   const grouped = useMemo<[string, Item[]][]>(() => {
     const map = new Map<string, Item[]>();
@@ -96,7 +111,7 @@ export default function ReportPage({ params }: { params: { id: string } }) {
   return (
     <>
       <div className="row no-print" style={{ marginBottom: 16 }}>
-        <Link href={`/orders/${order.id}`} className="btn">
+        <Link href={`/orders/view?id=${order.id}`} className="btn">
           ← رجوع للطلب
         </Link>
         <button className="btn primary" onClick={() => window.print()}>

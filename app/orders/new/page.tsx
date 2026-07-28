@@ -194,7 +194,7 @@ function NewOrder() {
         summary: `طلب ${orderNo} — ${items.length} فحص للمريض ${patient.fullName}`,
       });
 
-      router.push(`/orders/${order.id}`);
+      router.push(`/orders/view?id=${order.id}`);
     } catch (err) {
       setMsg(`تعذّر إنشاء الطلب: ${(err as Error).message}`);
       setSaving(false);
