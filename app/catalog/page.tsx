@@ -15,6 +15,25 @@ const RESULT_TYPE_LABEL: Record<string, string> = {
   OPTION: "اختيار من قائمة",
 };
 
+/** صفّ مدى مرجعي قيد التحرير — نصوص لأنها قادمة من `<input>`. */
+type RangeDraft = {
+  sex: string; // "" = الجنسان
+  ageMinYears: string;
+  ageMaxYears: string;
+  low: string;
+  high: string;
+  text: string;
+};
+
+const EMPTY_RANGE: RangeDraft = {
+  sex: "",
+  ageMinYears: "",
+  ageMaxYears: "",
+  low: "",
+  high: "",
+  text: "",
+};
+
 /** مسوّدة نموذج التحرير — كل الحقول نصوص لأنها قادمة من `<input>`. */
 type Draft = {
   id?: string;
@@ -31,6 +50,7 @@ type Draft = {
   criticalHigh: string;
   sortOrder: string;
   options: string;
+  ranges: RangeDraft[];
   active: boolean;
 };
 
@@ -48,6 +68,7 @@ const EMPTY_DRAFT: Draft = {
   criticalHigh: "",
   sortOrder: "100",
   options: "",
+  ranges: [],
   active: true,
 };
 
@@ -67,6 +88,14 @@ function toDraft(t: LabTest): Draft {
     criticalHigh: t.criticalHigh == null ? "" : String(t.criticalHigh),
     sortOrder: String(t.sortOrder ?? 100),
     options: (t.options ?? []).filter(Boolean).join("، "),
+    ranges: (t.ranges ?? []).filter(Boolean).map((r) => ({
+      sex: r?.sex ?? "",
+      ageMinYears: r?.ageMinYears == null ? "" : String(r.ageMinYears),
+      ageMaxYears: r?.ageMaxYears == null ? "" : String(r.ageMaxYears),
+      low: r?.low == null ? "" : String(r.low),
+      high: r?.high == null ? "" : String(r.high),
+      text: r?.text ?? "",
+    })),
     active: t.active !== false,
   };
 }
@@ -231,6 +260,20 @@ export default function CatalogPage() {
                 .map((s) => s.trim())
                 .filter(Boolean)
             : undefined,
+        /* المدى الفارغ تمامًا يُسقط: صفّ بلا حدّ ولا نصّ لا يطابق شيئًا
+           وقت اختيار المدى، فوجوده يزحم القائمة بلا أثر. */
+        ranges: draft.ranges
+          .filter(
+            (r) => r.low.trim() || r.high.trim() || r.text.trim()
+          )
+          .map((r) => ({
+            sex: r.sex || null,
+            ageMinYears: num(r.ageMinYears),
+            ageMaxYears: num(r.ageMaxYears),
+            low: num(r.low),
+            high: num(r.high),
+            text: r.text.trim() || null,
+          })),
         active: draft.active,
       };
 
@@ -678,6 +721,122 @@ function TestEditor({
         )}
       </div>
 
+      {/* المديات المرجعية: يُختار منها وقت إنشاء الطلب المدى المطابق
+          لجنس المريض وعمره، ويُجمَّد في الطلب. الترتيب مهمّ: أول مدى
+          مطابق يفوز، فالأدقّ (طفل/أنثى) يوضع قبل العامّ. */}
+      <div className="field" style={{ marginTop: 4 }}>
+        <label>المديات المرجعية</label>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>الجنس</th>
+                <th>عمر من</th>
+                <th>إلى</th>
+                <th>الحدّ الأدنى</th>
+                <th>الحدّ الأعلى</th>
+                <th>نص بديل</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {draft.ranges.map((r, i) => {
+                const setRange = (patch: Partial<RangeDraft>) =>
+                  set(
+                    "ranges",
+                    draft.ranges.map((x, k) => (k === i ? { ...x, ...patch } : x))
+                  );
+                return (
+                  <tr key={i}>
+                    <td>
+                      <select
+                        value={r.sex}
+                        onChange={(e) => setRange({ sex: e.target.value })}
+                      >
+                        <option value="">الجنسان</option>
+                        <option value="MALE">{SEX_LABEL.MALE}</option>
+                        <option value="FEMALE">{SEX_LABEL.FEMALE}</option>
+                      </select>
+                    </td>
+                    <td>
+                      <input
+                        style={{ maxWidth: 80 }}
+                        inputMode="decimal"
+                        value={r.ageMinYears}
+                        onChange={(e) => setRange({ ageMinYears: e.target.value })}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        style={{ maxWidth: 80 }}
+                        inputMode="decimal"
+                        value={r.ageMaxYears}
+                        onChange={(e) => setRange({ ageMaxYears: e.target.value })}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        style={{ maxWidth: 90 }}
+                        inputMode="decimal"
+                        value={r.low}
+                        onChange={(e) => setRange({ low: e.target.value })}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        style={{ maxWidth: 90 }}
+                        inputMode="decimal"
+                        value={r.high}
+                        onChange={(e) => setRange({ high: e.target.value })}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        value={r.text}
+                        onChange={(e) => setRange({ text: e.target.value })}
+                        placeholder="سلبي"
+                      />
+                    </td>
+                    <td className="nowrap">
+                      <button
+                        className="btn sm danger"
+                        onClick={() =>
+                          set(
+                            "ranges",
+                            draft.ranges.filter((_, k) => k !== i)
+                          )
+                        }
+                      >
+                        حذف
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {draft.ranges.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="muted small">
+                    لا مديات — النتيجة ستظهر بلا عَلَم طبيعي/مرتفع/منخفض.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div className="row" style={{ marginTop: 8 }}>
+          <button
+            className="btn sm"
+            onClick={() => set("ranges", [...draft.ranges, { ...EMPTY_RANGE }])}
+          >
+            + مدى مرجعي
+          </button>
+          <span className="hint">
+            اترك الجنس والعمر فارغين للمدى العامّ. ضع مدى الأطفال أو الإناث قبله
+            — يُختار أول مدى مطابق.
+          </span>
+        </div>
+      </div>
+
       <div className="row" style={{ marginTop: 12 }}>
         <button className="btn primary" onClick={onSave} disabled={busy}>
           {busy ? "جارٍ الحفظ…" : draft.id ? "حفظ التعديلات" : "إضافة الفحص"}
@@ -692,12 +851,10 @@ function TestEditor({
         </label>
       </div>
 
-      {draft.id && (
-        <p className="small muted" style={{ marginTop: 10 }}>
-          المديات المرجعية لهذا الفحص تُحرَّر من الكتالوج الافتراضي حاليًا — تعديلها
-          هنا لم يُفعَّل بعد.
-        </p>
-      )}
+      <p className="small muted" style={{ marginTop: 10 }}>
+        تعديل المدى المرجعي لا يغيّر تقارير سابقة: كل طلب يحتفظ بنسخة من المدى
+        وقت تسجيله. ويجب أن يعتمد مسؤول الجودة أي مدى قبل تشغيله.
+      </p>
     </div>
   );
 }
