@@ -68,6 +68,7 @@ const schema = a.schema({
       resultType: a.ref("ResultType").required(),
       unit: a.string(),
       sampleType: a.string(), // دم وريدي / بول / مسحة …
+      tubeType: a.string(), // أنبوب أحمر / بنفسجي EDTA / أزرق سترات …
       price: a.float().default(0),
       options: a.string().array(), // لفحوصات OPTION: ["إيجابي","سلبي"]
       ranges: a.ref("ReferenceRange").array(),
@@ -79,6 +80,28 @@ const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("code").queryField("listLabTestsByCode")])
     .authorization((allow) => [
+      allow.guest(), // وضع مفتوح: الزائر بلا تسجيل دخول
+      allow.groups(["admin"]),
+      allow.authenticated().to(["read"]),
+    ]),
+
+  /* ── إعدادات المختبر ────────────────────────────────────────
+     سجل واحد فقط (`key = "MAIN"`) يديره مدير المختبر: العملة المعروضة
+     في الأسعار والفواتير، وقوائم أنواع العيّنات والأنابيب التي تظهر
+     كخيارات جاهزة عند تعريف الفحوصات. القوائم هنا وليست ثوابت في
+     الكود كي يضيف المدير نوعًا جديدًا بلا نشر جديد.                */
+  LabConfig: a
+    .model({
+      key: a.string().required(), // "MAIN" — سجل مفرد
+      labName: a.string(),
+      currency: a.string(), // الرمز المعروض: ر.س · $ · ﷼ …
+      currencyCode: a.string(), // SAR · USD · YER — للفواتير والتصدير
+      sampleTypes: a.string().array(), // دم وريدي · بول · براز · مسحة …
+      tubeTypes: a.string().array(), // أنبوب أحمر · بنفسجي EDTA …
+    })
+    .secondaryIndexes((index) => [index("key").queryField("listLabConfigByKey")])
+    .authorization((allow) => [
+      allow.guest(), // وضع مفتوح: الزائر بلا تسجيل دخول
       allow.groups(["admin"]),
       allow.authenticated().to(["read"]),
     ]),
@@ -98,6 +121,7 @@ const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("mrn").queryField("listPatientsByMrn")])
     .authorization((allow) => [
+      allow.guest(), // وضع مفتوح: الزائر بلا تسجيل دخول
       allow.groups(["admin", "reception"]),
       allow.groups(["quality", "tech", "doctor"]).to(["read"]),
     ]),
@@ -139,6 +163,7 @@ const schema = a.schema({
       index("orderNo").queryField("listOrdersByOrderNo"),
     ])
     .authorization((allow) => [
+      allow.guest(), // وضع مفتوح: الزائر بلا تسجيل دخول
       allow.groups(["admin", "reception"]),
       allow.groups(["quality", "tech"]).to(["read", "update"]),
       allow.groups(["doctor"]).to(["read"]),
@@ -192,6 +217,7 @@ const schema = a.schema({
         .queryField("listPendingCriticals"),
     ])
     .authorization((allow) => [
+      allow.guest(), // وضع مفتوح: الزائر بلا تسجيل دخول
       allow.groups(["admin", "quality", "tech"]),
       allow.groups(["reception"]).to(["create", "read", "delete"]),
       allow.groups(["doctor"]).to(["read"]),
@@ -210,7 +236,10 @@ const schema = a.schema({
       before: a.json(),
       after: a.json(),
     })
-    .authorization((allow) => [allow.authenticated().to(["create", "read"])]),
+    .authorization((allow) => [
+      allow.guest().to(["create", "read"]), // الزائر يُسجَّل باسم «زائر»
+      allow.authenticated().to(["create", "read"]),
+    ]),
 });
 
 export type Schema = ClientSchema<typeof schema>;
@@ -218,7 +247,12 @@ export type Schema = ClientSchema<typeof schema>;
 export const data = defineData({
   schema,
   authorizationModes: {
-    // بيانات صحية حسّاسة: لا وصول عبر مفتاح API عام.
+    // المسجَّلون يستخدمون رمز Cognito، فتبقى قواعد المجموعات (الأدوار)
+    // سارية عليهم. الزائر بلا حساب يمرّ عبر دور IAM غير المُصادَق
+    // (identityPool) الذي تمنحه قاعدة `allow.guest()` أعلاه.
+    //
+    // ⚠️ وضع مفتوح: أي زائر يقرأ ويكتب بيانات المرضى والنتائج. مناسب
+    // للعرض التجريبي فقط — لبيانات مرضى حقيقية احذف كل `allow.guest()`.
     defaultAuthorizationMode: "userPool",
   },
 });

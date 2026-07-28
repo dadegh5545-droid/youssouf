@@ -3,13 +3,64 @@
 import { Amplify } from "aws-amplify";
 import { generateClient } from "aws-amplify/data";
 import { fetchAuthSession, fetchUserAttributes } from "aws-amplify/auth";
+import { Hub } from "aws-amplify/utils";
 import { useEffect, useState } from "react";
 import outputs from "@/amplify_outputs.json";
 import type { Schema } from "@/amplify/data/resource";
 
 Amplify.configure(outputs, { ssr: true });
 
-export const client = generateClient<Schema>({ authMode: "userPool" });
+/* ── وضع المصادقة ──────────────────────────────────────────────
+   التطبيق مفتوح للزوار بلا تسجيل دخول: من لا يملك رمزًا مميّزًا
+   يمرّ عبر دور IAM غير المُصادَق (`identityPool`) الذي تسمح له
+   قاعدة `allow.guest()` في المخطط. ومن سجّل دخوله نُبقيه على
+   `userPool` كي تبقى قواعد المجموعات (الأدوار) سارية عليه.
+
+   وكيل (Proxy) لأن `generateClient` يثبّت وضع المصادقة وقت الإنشاء،
+   بينما الوضع هنا يتغيّر عند الدخول والخروج.                    */
+const clients = {
+  identityPool: generateClient<Schema>({ authMode: "identityPool" }),
+  userPool: generateClient<Schema>({ authMode: "userPool" }),
+};
+
+/* قراءة الجلسة غير متزامنة، والصفحات تُطلق استعلاماتها فور تركيبها. لولا
+   هذا التلميح المحفوظ لانطلق أول استعلام لمستخدم مسجَّل بوضع الزائر —
+   أي عبر دور IAM المُصادَق الذي لا يملك صلاحية على شيء، فيرى «غير مصرّح»
+   في أول تحميل ثم تعمل الصفحة بعد تحديثها. */
+const MODE_HINT = "lis.authMode";
+
+let mode: keyof typeof clients =
+  typeof window !== "undefined" && localStorage.getItem(MODE_HINT) === "userPool"
+    ? "userPool"
+    : "identityPool";
+
+export const client = new Proxy(clients.identityPool, {
+  get: (_target, prop) => Reflect.get(clients[mode], prop, clients[mode]),
+});
+
+async function syncAuthMode() {
+  try {
+    const session = await fetchAuthSession();
+    mode = session.tokens?.accessToken ? "userPool" : "identityPool";
+  } catch {
+    mode = "identityPool";
+  }
+  if (mode === "userPool") localStorage.setItem(MODE_HINT, "userPool");
+  else localStorage.removeItem(MODE_HINT);
+}
+
+if (typeof window !== "undefined") {
+  void syncAuthMode();
+  Hub.listen("auth", ({ payload }) => {
+    if (
+      payload.event === "signedIn" ||
+      payload.event === "signedOut" ||
+      payload.event === "tokenRefresh"
+    ) {
+      void syncAuthMode();
+    }
+  });
+}
 
 export type Role = "admin" | "quality" | "tech" | "reception" | "doctor";
 
@@ -26,11 +77,18 @@ export type Session = {
   email: string;
   name: string;
   roles: Role[];
+  /** زائر يتصفّح بلا تسجيل دخول */
+  guest: boolean;
+  /** الاسم الذي يُحفظ في الحقول وسجل التدقيق: البريد، أو «زائر» */
+  actor: string;
   /** مستخدم مسجَّل لكن لم يُسنَد إلى أي مجموعة بعد */
   pending: boolean;
   /** صلاحية تنفيذ إجراء معيّن */
   can: (action: Action) => boolean;
 };
+
+/** اسم الزائر كما يُحفظ في الحقول والسجلات — لا بريد له. */
+export const GUEST_LABEL = "زائر";
 
 export type Action =
   | "managePatients"
@@ -59,11 +117,12 @@ const MATRIX: Record<Action, Role[]> = {
  * يتم في قواعد authorization داخل amplify/data/resource.ts.
  */
 export function useSession(): Session {
-  const [state, setState] = useState<Omit<Session, "can" | "pending">>({
+  const [state, setState] = useState<Omit<Session, "can" | "pending" | "actor">>({
     loading: true,
     email: "",
     name: "",
     roles: [],
+    guest: true,
   });
 
   useEffect(() => {
@@ -71,7 +130,22 @@ export function useSession(): Session {
     (async () => {
       try {
         const session = await fetchAuthSession();
-        const payload = session.tokens?.accessToken?.payload as
+
+        // لا رمز مميّز = زائر بلا حساب. ليس خطأً ولا حالة انتظار:
+        // التطبيق مفتوح له، ويُسجَّل في البيانات باسم «زائر».
+        if (!session.tokens?.accessToken) {
+          if (alive)
+            setState({
+              loading: false,
+              email: "",
+              name: GUEST_LABEL,
+              roles: [],
+              guest: true,
+            });
+          return;
+        }
+
+        const payload = session.tokens.accessToken.payload as
           | Record<string, unknown>
           | undefined;
         const groups = (payload?.["cognito:groups"] as string[] | undefined) ?? [];
@@ -90,9 +164,11 @@ export function useSession(): Session {
           email,
           name,
           roles: groups.filter((g): g is Role => g in ROLE_LABEL),
+          guest: false,
         });
       } catch {
-        if (alive) setState((s) => ({ ...s, loading: false }));
+        if (alive)
+          setState((s) => ({ ...s, loading: false, name: GUEST_LABEL, guest: true }));
       }
     })();
     return () => {
@@ -102,11 +178,16 @@ export function useSession(): Session {
 
   return {
     ...state,
+    actor: state.email || (state.guest ? GUEST_LABEL : "unknown"),
     // مستخدم بلا مجموعة لا يملك شيئًا. كان يُعامل كـ«استقبال» افتراضيًا،
     // فتظهر له أزرار يرفضها الخادم برسالة GraphQL غامضة. الآن تُخفى
     // الأزرار وتظهر له لافتة تشرح أنه بانتظار تعيين صلاحية.
-    pending: !state.loading && state.roles.length === 0,
-    can: (action) => state.roles.some((r) => MATRIX[action].includes(r)),
+    // الزائر مستثنى: ليس بانتظار شيء — هذا وضعه الطبيعي.
+    pending: !state.loading && !state.guest && state.roles.length === 0,
+    // الزائر يجرّب كل شيء (الخادم يسمح له عبر `allow.guest()`)، وإلا
+    // لرأى تطبيقًا فارغًا بلا أزرار.
+    can: (action) =>
+      state.guest || state.roles.some((r) => MATRIX[action].includes(r)),
   };
 }
 

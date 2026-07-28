@@ -4,6 +4,7 @@ import { Fragment, Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { client, listAll } from "@/lib/amplify";
+import { useLabConfig } from "@/lib/config";
 import type { Schema } from "@/amplify/data/resource";
 import {
   DEPARTMENT_LABEL,
@@ -36,6 +37,8 @@ export default function Page() {
 }
 
 function ReportPage() {
+  // اسم المختبر من الإعدادات — الترويسة الثابتة أدناه احتياط قبل ضبطها.
+  const { labName } = useLabConfig();
   const params = useSearchParams();
   const orderId = params.get("id") ?? "";
   const [order, setOrder] = useState<Order | null>(null);
@@ -131,7 +134,7 @@ function ReportPage() {
       <div className="report">
         <div className="report-head">
           <div>
-            <h1>{LAB.name}</h1>
+            <h1>{labName || LAB.name}</h1>
             <div className="muted small">{LAB.subtitle}</div>
             <div className="muted small">{LAB.license}</div>
           </div>

@@ -1,11 +1,13 @@
 "use client";
 
-import { Authenticator, translations } from "@aws-amplify/ui-react";
+import { translations } from "@aws-amplify/ui-react";
 import { I18n } from "aws-amplify/utils";
 import "@aws-amplify/ui-react/styles.css";
 import "@/lib/amplify"; // يُهيّئ Amplify.configure مرة واحدة
+import { LabConfigProvider } from "@/lib/config";
 import Nav from "./components/Nav";
 import PendingBanner from "./components/PendingBanner";
+import WelcomeBanner from "./components/WelcomeBanner";
 
 I18n.putVocabularies(translations);
 I18n.setLanguage("ar");
@@ -23,14 +25,23 @@ I18n.putVocabulariesForLanguage("ar", {
   "Forgot your password?": "نسيت كلمة المرور؟",
 });
 
+/**
+ * لا بوابة تسجيل دخول: التطبيق يُفتح مباشرة للزائر.
+ *
+ * كان `<Authenticator>` يلفّ كل شيء فلا يظهر أي محتوى قبل الدخول. الآن
+ * الزائر يدخل ويجرّب كل الصفحات (الخادم يسمح له عبر `allow.guest()`)،
+ * وتسجيل الدخول اختياري من `/login` لمن يريد أن يُسجَّل اسمه في
+ * سجل التدقيق ويعمل ضمن دوره.
+ */
 export default function Providers({ children }: { children: React.ReactNode }) {
   return (
-    <Authenticator variation="modal" signUpAttributes={["name"]}>
+    <LabConfigProvider>
       <Nav />
       <div className="container">
+        <WelcomeBanner />
         <PendingBanner />
         {children}
       </div>
-    </Authenticator>
+    </LabConfigProvider>
   );
 }

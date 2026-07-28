@@ -142,9 +142,11 @@ function OrderPage() {
      `quality` موجود في enterResults و approveResults معًا، فبلا هذا
      الفحص يستطيع شخص واحد إدخال نتيجة واعتمادها دون أي مراجعة.     */
   const selfEntered = items.filter(
-    (i) => i.enteredBy && session.email && i.enteredBy === session.email
+    (i) => i.enteredBy && session.actor && i.enteredBy === session.actor
   );
-  const isAdmin = session.roles.includes("admin");
+  // الزائر مستثنى: كل الزوار يحملون الاسم نفسه («زائر»)، فقاعدة «أربع
+  // أعين» ستمنع اعتماد أي نتيجة أدخلها زائر آخر — أي جمود كامل.
+  const isAdmin = session.roles.includes("admin") || session.guest;
 
   const grouped = useMemo<[string, Item[]][]>(() => {
     const map = new Map<string, Item[]>();
@@ -199,7 +201,7 @@ function OrderPage() {
           valueText: raw && item.resultType !== "NUMERIC" ? raw : null,
           flag: flag ?? null,
           comment: d.comment || null,
-          enteredBy: session.email,
+          enteredBy: session.actor,
           enteredAt: now,
           // الفهرس المتفرّق لتنبيه القيم الحرجة في لوحة اليوم
           criticalPending:
@@ -212,7 +214,7 @@ function OrderPage() {
           entity: "OrderItem",
           entityId: item.id,
           action: approved ? "RESULT_AMENDED" : "RESULT_ENTERED",
-          actor: session.email,
+          actor: session.actor,
           summary: `${item.testNameAr}: ${prevValue || "—"} ← ${raw || "—"}${
             reason ? ` (سبب التعديل: ${reason})` : ""
           }`,
@@ -232,14 +234,14 @@ function OrderPage() {
           id: order.id,
           reportRevision: rev,
           amendedAt: now,
-          amendedBy: session.name || session.email,
+          amendedBy: session.name || session.actor,
           amendReason: reason,
         });
         await audit({
           entity: "Order",
           entityId: order.id,
           action: "REPORT_AMENDED",
-          actor: session.email,
+          actor: session.actor,
           summary: `تعديل تقرير معتمد ${order.orderNo} — مراجعة ${rev}: ${reason}`,
         });
         setMsg(`حُفظت ${changed} نتيجة. صدرت مراجعة رقم ${rev} من التقرير.`);
@@ -269,13 +271,13 @@ function OrderPage() {
         id: order.id,
         status: "COLLECTED",
         collectedAt: new Date().toISOString(),
-        collectedBy: session.email,
+        collectedBy: session.actor,
       });
       await audit({
         entity: "Order",
         entityId: order.id,
         action: "SAMPLE_COLLECTED",
-        actor: session.email,
+        actor: session.actor,
         summary: `سحب عيّنة الطلب ${order.orderNo}`,
       });
       await load();
@@ -320,7 +322,7 @@ function OrderPage() {
       for (const i of items) {
         await client.models.OrderItem.update({
           id: i.id,
-          verifiedBy: session.email,
+          verifiedBy: session.actor,
           verifiedAt: now,
         });
       }
@@ -328,13 +330,13 @@ function OrderPage() {
         id: order.id,
         status: "APPROVED",
         approvedAt: now,
-        approvedBy: session.name || session.email,
+        approvedBy: session.name || session.actor,
       });
       await audit({
         entity: "Order",
         entityId: order.id,
         action: "ORDER_APPROVED",
-        actor: session.email,
+        actor: session.actor,
         summary:
           `اعتماد الطلب ${order.orderNo} (${items.length} فحص)` +
           (selfEntered.length > 0
@@ -364,14 +366,14 @@ function OrderPage() {
         id: order.id,
         status: "DELIVERED",
         deliveredAt: now,
-        deliveredBy: session.email,
+        deliveredBy: session.actor,
         deliveredTo: who.trim() || null,
       });
       await audit({
         entity: "Order",
         entityId: order.id,
         action: "REPORT_DELIVERED",
-        actor: session.email,
+        actor: session.actor,
         summary: `تسليم تقرير ${order.orderNo} إلى ${who.trim() || "—"}`,
       });
       setMsg("سُجّل تسليم التقرير.");
@@ -400,14 +402,14 @@ function OrderPage() {
         id: order.id,
         status: "CANCELLED",
         cancelledAt: now,
-        cancelledBy: session.email,
+        cancelledBy: session.actor,
         cancelReason: reason.trim(),
       });
       await audit({
         entity: "Order",
         entityId: order.id,
         action: "ORDER_CANCELLED",
-        actor: session.email,
+        actor: session.actor,
         summary: `إلغاء الطلب ${order.orderNo}: ${reason.trim()}`,
       });
       setMsg("أُلغي الطلب.");
@@ -436,7 +438,7 @@ function OrderPage() {
         entity: "OrderItem",
         entityId: item.id,
         action: "CRITICAL_NOTIFIED",
-        actor: session.email,
+        actor: session.actor,
         summary: `إبلاغ ${who} بقيمة حرجة في ${item.testNameAr}`,
       });
       await load();

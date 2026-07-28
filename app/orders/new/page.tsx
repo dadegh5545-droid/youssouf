@@ -180,7 +180,7 @@ function NewOrder() {
           id: order.id,
           status: "CANCELLED",
           cancelledAt: new Date().toISOString(),
-          cancelledBy: session.email,
+          cancelledBy: session.actor,
           cancelReason: `فشل إنشاء فحوصات الطلب: ${(itemErr as Error).message}`,
         });
         throw itemErr;
@@ -190,7 +190,7 @@ function NewOrder() {
         entity: "Order",
         entityId: order.id,
         action: "ORDER_CREATED",
-        actor: session.email,
+        actor: session.actor,
         summary: `طلب ${orderNo} — ${items.length} فحص للمريض ${patient.fullName}`,
       });
 
@@ -334,6 +334,10 @@ function NewOrder() {
                 <span className="muted small">
                   {DEPARTMENT_LABEL[t.department ?? ""]}
                 </span>
+                {/* الأنبوب تعليمة لفنّي السحب: يراها قبل تسجيل الطلب. */}
+                {t.tubeType && (
+                  <span className="muted small nowrap">🧪 {t.tubeType}</span>
+                )}
                 <span className="spacer" />
                 <span className="muted small nowrap">{fmtMoney(t.price)}</span>
               </div>

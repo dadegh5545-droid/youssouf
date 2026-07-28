@@ -263,8 +263,25 @@ export function fmtDate(iso?: string | null): string {
   });
 }
 
-export function fmtMoney(v?: number | null): string {
-  return `${(v ?? 0).toLocaleString(LOCALE, { maximumFractionDigits: 2 })} ر.س`;
+/* ── العملة ────────────────────────────────────────────────────
+   الرمز يأتي من إعدادات المختبر (`LabConfig`) لا من الكود، فالمختبر
+   قد يعمل بريال أو دولار أو أي عملة. يُضبط مرة عند تحميل الإعدادات
+   عبر `setCurrency`، ويبقى «ر.س» افتراضًا قبل وصولها.            */
+export const DEFAULT_CURRENCY = "ر.س";
+
+let currencySymbol = DEFAULT_CURRENCY;
+
+export function setCurrency(symbol?: string | null): void {
+  currencySymbol = symbol?.trim() || DEFAULT_CURRENCY;
+}
+
+export function getCurrency(): string {
+  return currencySymbol;
+}
+
+export function fmtMoney(v?: number | null, symbol?: string): string {
+  const unit = symbol?.trim() || currencySymbol;
+  return `${(v ?? 0).toLocaleString(LOCALE, { maximumFractionDigits: 2 })} ${unit}`;
 }
 
 export function isToday(iso?: string | null): boolean {
