@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { client } from "@/lib/amplify";
+import { client, listAll } from "@/lib/amplify";
 import type { Schema } from "@/amplify/data/resource";
 import { PRIORITY_LABEL, STATUS_META, fmtDateTime, fmtMoney } from "@/lib/lab";
 
@@ -15,6 +15,8 @@ const FILTERS: { key: string; label: string }[] = [
   { key: "IN_PROGRESS", label: "قيد التحليل" },
   { key: "PENDING_REVIEW", label: "بانتظار الاعتماد" },
   { key: "APPROVED", label: "معتمد" },
+  { key: "DELIVERED", label: "مُسلّم" },
+  { key: "CANCELLED", label: "ملغى" },
   { key: "ALL", label: "الكل" },
 ];
 
@@ -24,17 +26,27 @@ export default function OrdersPage() {
   const [filter, setFilter] = useState("ACTIVE");
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
+  const [msg, setMsg] = useState("");
 
   useEffect(() => {
     (async () => {
+      // listAll يتبع nextToken — بدونه تُعرض الصفحة الأولى فقط (حد 1MB
+      // في DynamoDB) فتختفي طلبات ومرضى من القائمة بلا أي رسالة.
       const [o, p] = await Promise.all([
-        client.models.Order.list({ limit: 1000 }),
-        client.models.Patient.list({ limit: 1000 }),
+        listAll<Order>((nextToken) =>
+          client.models.Order.list({ limit: 500, nextToken })
+        ),
+        listAll<Patient>((nextToken) =>
+          client.models.Patient.list({ limit: 500, nextToken })
+        ),
       ]);
-      setOrders(o.data ?? []);
-      setPatients(new Map((p.data ?? []).map((x) => [x.id, x])));
+      setOrders(o);
+      setPatients(new Map(p.map((x) => [x.id, x])));
       setLoading(false);
-    })().catch(() => setLoading(false));
+    })().catch((e) => {
+      setMsg(`تعذّر تحميل القائمة: ${(e as Error).message}`);
+      setLoading(false);
+    });
   }, []);
 
   const rows = useMemo(() => {
@@ -78,6 +90,8 @@ export default function OrdersPage() {
           + طلب جديد
         </Link>
       </div>
+
+      {msg && <div className="alert danger">{msg}</div>}
 
       <div className="card">
         <div className="card-head">

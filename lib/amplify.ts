@@ -26,6 +26,8 @@ export type Session = {
   email: string;
   name: string;
   roles: Role[];
+  /** مستخدم مسجَّل لكن لم يُسنَد إلى أي مجموعة بعد */
+  pending: boolean;
   /** صلاحية تنفيذ إجراء معيّن */
   can: (action: Action) => boolean;
 };
@@ -57,7 +59,7 @@ const MATRIX: Record<Action, Role[]> = {
  * يتم في قواعد authorization داخل amplify/data/resource.ts.
  */
 export function useSession(): Session {
-  const [state, setState] = useState<Omit<Session, "can">>({
+  const [state, setState] = useState<Omit<Session, "can" | "pending">>({
     loading: true,
     email: "",
     name: "",
@@ -100,12 +102,88 @@ export function useSession(): Session {
 
   return {
     ...state,
-    can: (action) => {
-      // مستخدم بلا مجموعة (أول تسجيل) يُعامل كاستقبال حتى يعيّنه المدير.
-      const roles = state.roles.length ? state.roles : (["reception"] as Role[]);
-      return roles.some((r) => MATRIX[action].includes(r));
-    },
+    // مستخدم بلا مجموعة لا يملك شيئًا. كان يُعامل كـ«استقبال» افتراضيًا،
+    // فتظهر له أزرار يرفضها الخادم برسالة GraphQL غامضة. الآن تُخفى
+    // الأزرار وتظهر له لافتة تشرح أنه بانتظار تعيين صلاحية.
+    pending: !state.loading && state.roles.length === 0,
+    can: (action) => state.roles.some((r) => MATRIX[action].includes(r)),
   };
+}
+
+/* ── ترقيم الصفحات ────────────────────────────────────────────
+   DynamoDB يرجع صفحة واحدة بحد أقصى 1MB مهما كان `limit`، ويعيد
+   `nextToken` لبقية النتائج. كل استدعاء `list()` بلا حلقة كان يعرض
+   الصفحة الأولى فقط ويتجاهل الباقي بصمت — أي أن العدّادات والقوائم
+   تصبح خاطئة بلا أي رسالة خطأ بمجرد نمو البيانات.                */
+
+type Page<T> = {
+  data: T[];
+  nextToken?: string | null;
+  errors?: readonly { message: string }[];
+};
+
+export async function listAll<T>(
+  fetchPage: (nextToken?: string) => Promise<Page<T>>,
+  max = 10000
+): Promise<T[]> {
+  const out: T[] = [];
+  let token: string | undefined;
+  let guard = 0;
+  do {
+    const res = await fetchPage(token);
+    if (res.errors?.length) throw new Error(res.errors[0].message);
+    out.push(...(res.data ?? []));
+    token = res.nextToken ?? undefined;
+  } while (token && out.length < max && ++guard < 200);
+  return out;
+}
+
+/* ── أرقام فريدة ───────────────────────────────────────────────
+   رقم الطلب هو الرقم المطبوع على الباركود الملصق على الأنبوب، ورقم
+   الملف هو هوية المريض في النظام. تكرار أيّهما يعني نسبة عيّنة أو
+   نتيجة إلى الشخص الخطأ. الفهرس الثانوي ليس قيد تفرّد، لذلك نتحقق
+   صراحةً قبل الإنشاء ونعيد التوليد عند التصادم.                  */
+
+async function reserveUnique(
+  generate: () => string,
+  exists: (candidate: string) => Promise<boolean>,
+  what: string
+): Promise<string> {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const candidate = generate();
+    if (!(await exists(candidate))) return candidate;
+  }
+  throw new Error(`تعذّر توليد ${what} فريد بعد ١٠ محاولات — أعد المحاولة.`);
+}
+
+export function reserveOrderNo(generate: () => string): Promise<string> {
+  return reserveUnique(
+    generate,
+    async (orderNo) => {
+      const { data, errors } = await client.models.Order.listOrdersByOrderNo(
+        { orderNo },
+        { limit: 1, selectionSet: ["id"] }
+      );
+      if (errors?.length) throw new Error(errors[0].message);
+      return (data?.length ?? 0) > 0;
+    },
+    "رقم طلب"
+  );
+}
+
+export function reserveMrn(generate: () => string): Promise<string> {
+  return reserveUnique(
+    generate,
+    async (mrn) => {
+      const { data, errors } = await client.models.Patient.listPatientsByMrn(
+        { mrn },
+        { limit: 1, selectionSet: ["id"] }
+      );
+      if (errors?.length) throw new Error(errors[0].message);
+      return (data?.length ?? 0) > 0;
+    },
+    "رقم ملف"
+  );
 }
 
 /** كتابة سطر في سجل التدقيق — لا يُفشل العملية الأصلية إذا تعذّر. */

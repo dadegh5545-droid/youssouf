@@ -91,9 +91,11 @@ export const SEED_TESTS: SeedTest[] = [
     unit: "mg/dL",
     sampleType: BLOOD,
     price: 15,
+    // `ageMinYears` على مديات البالغين مقصود: بدونه يطابق الطفلُ مدى
+    // البالغين أيضًا، فيظهر كرياتينين ١.٠ عند طفل (مرتفع فعليًا) «طبيعيًا».
     ranges: [
-      { sex: "MALE", low: 0.7, high: 1.3 },
-      { sex: "FEMALE", low: 0.6, high: 1.1 },
+      { sex: "MALE", ageMinYears: 15, low: 0.7, high: 1.3 },
+      { sex: "FEMALE", ageMinYears: 15, low: 0.6, high: 1.1 },
       { ageMaxYears: 15, low: 0.3, high: 0.7 },
     ],
     criticalHigh: 7,
@@ -375,8 +377,8 @@ export const SEED_TESTS: SeedTest[] = [
     sampleType: EDTA,
     price: 0,
     ranges: [
-      { sex: "MALE", low: 13.5, high: 17.5 },
-      { sex: "FEMALE", low: 12, high: 15.5 },
+      { sex: "MALE", ageMinYears: 12, low: 13.5, high: 17.5 },
+      { sex: "FEMALE", ageMinYears: 12, low: 12, high: 15.5 },
       { ageMaxYears: 12, low: 11.5, high: 15.5 },
     ],
     criticalLow: 7,

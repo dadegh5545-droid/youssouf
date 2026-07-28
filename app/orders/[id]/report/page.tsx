@@ -2,7 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { client } from "@/lib/amplify";
+import { client, listAll } from "@/lib/amplify";
 import type { Schema } from "@/amplify/data/resource";
 import {
   DEPARTMENT_LABEL,
@@ -11,6 +11,7 @@ import {
   ageLabel,
   fmtDateTime,
   isCritical,
+  verificationCode,
   type Flag,
 } from "@/lib/lab";
 
@@ -39,16 +40,19 @@ export default function ReportPage({ params }: { params: { id: string } }) {
         return;
       }
       setOrder(o);
-      const [{ data: p }, { data: its }] = await Promise.all([
+      const [{ data: p }, its] = await Promise.all([
         client.models.Patient.get({ id: o.patientId }),
-        client.models.OrderItem.list({
-          limit: 500,
-          filter: { orderId: { eq: o.id } },
-        }),
+        // استعلام مفهرس — لا Scan للجدول (انظر التعليق في صفحة الطلب)
+        listAll<Item>((nextToken) =>
+          client.models.OrderItem.listOrderItemsByOrder(
+            { orderId: o.id },
+            { limit: 200, nextToken }
+          )
+        ),
       ]);
       setPatient(p ?? null);
       setItems(
-        (its ?? []).sort((a, b) => (a.sortOrder ?? 100) - (b.sortOrder ?? 100))
+        [...its].sort((a, b) => (a.sortOrder ?? 100) - (b.sortOrder ?? 100))
       );
       setLoading(false);
     })().catch(() => setLoading(false));
@@ -75,6 +79,19 @@ export default function ReportPage({ params }: { params: { id: string } }) {
     );
 
   const isApproved = order.status === "APPROVED" || order.status === "DELIVERED";
+  const isCancelled = order.status === "CANCELLED";
+  const revision = order.reportRevision ?? 1;
+
+  /* رمز التحقق يُشتقّ من محتوى التقرير نفسه، فأي تغيير في قيمة نتيجة
+     أو في رقم المراجعة يغيّر الرمز. يقارَن الرمز المطبوع بما يعرضه
+     النظام عند الاستفسار عن صحّة تقرير. (كاشف تلاعب لا توقيع رقمي.) */
+  const verifyCode = verificationCode([
+    order.orderNo,
+    patient.mrn,
+    order.approvedAt,
+    revision,
+    ...items.map((i) => `${i.testCode}=${i.valueNumeric ?? i.valueText ?? ""}:${i.flag ?? ""}`),
+  ]);
 
   return (
     <>
@@ -85,10 +102,14 @@ export default function ReportPage({ params }: { params: { id: string } }) {
         <button className="btn primary" onClick={() => window.print()}>
           🖨️ طباعة / حفظ PDF
         </button>
-        {!isApproved && (
-          <span className="badge warn">
-            مسودّة — لم تُعتمد النتائج بعد، لا تُسلَّم للمريض
-          </span>
+        {isCancelled ? (
+          <span className="badge critical">طلب ملغى — لا يُطبع</span>
+        ) : (
+          !isApproved && (
+            <span className="badge warn">
+              مسودّة — لم تُعتمد النتائج بعد، لا تُسلَّم للمريض
+            </span>
+          )
         )}
       </div>
 
@@ -100,13 +121,54 @@ export default function ReportPage({ params }: { params: { id: string } }) {
             <div className="muted small">{LAB.license}</div>
           </div>
           <div style={{ textAlign: "left" }}>
-            <div style={{ fontWeight: 800, fontSize: "1.05rem" }}>تقرير نتائج مختبرية</div>
+            <div style={{ fontWeight: 800, fontSize: "1.05rem" }}>
+              تقرير نتائج مختبرية
+              {revision > 1 && ` — مراجعة ${revision}`}
+            </div>
             <div className="mono small">{order.orderNo}</div>
             <div className="muted small">{LAB.contact}</div>
           </div>
         </div>
 
-        {!isApproved && (
+        {isCancelled && (
+          <div
+            style={{
+              border: "2px solid #b91c1c",
+              background: "#fee2e2",
+              color: "#b91c1c",
+              padding: "8px 12px",
+              borderRadius: 8,
+              marginBottom: 16,
+              fontWeight: 700,
+              textAlign: "center",
+            }}
+          >
+            طلب ملغى — {order.cancelReason || "بلا سبب مسجّل"}
+          </div>
+        )}
+
+        {revision > 1 && (
+          <div
+            style={{
+              border: "2px solid #b45309",
+              background: "#fef3c7",
+              color: "#92400e",
+              padding: "8px 12px",
+              borderRadius: 8,
+              marginBottom: 16,
+              fontWeight: 700,
+              textAlign: "center",
+            }}
+          >
+            تقرير مُصحَّح (مراجعة {revision}) — يُلغي ويستبدل أي نسخة سابقة
+            <div style={{ fontWeight: 400, marginTop: 4 }}>
+              سبب التصحيح: {order.amendReason || "—"} · بواسطة {order.amendedBy} في{" "}
+              {fmtDateTime(order.amendedAt)}
+            </div>
+          </div>
+        )}
+
+        {!isApproved && !isCancelled && (
           <div
             style={{
               border: "2px dashed #b91c1c",
@@ -219,8 +281,11 @@ export default function ReportPage({ params }: { params: { id: string } }) {
           </div>
           <div style={{ textAlign: "left" }}>
             <div>رمز التحقق</div>
-            <div className="mono" style={{ fontWeight: 700 }}>
-              {order.orderNo}
+            <div className="mono" style={{ fontWeight: 700, letterSpacing: 1 }}>
+              {verifyCode}
+            </div>
+            <div className="muted small">
+              يُطابَق مع النظام للتأكد من عدم تغيير النتائج
             </div>
           </div>
         </div>

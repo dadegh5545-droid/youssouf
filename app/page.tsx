@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { client } from "@/lib/amplify";
+import { client, listAll } from "@/lib/amplify";
 import type { Schema } from "@/amplify/data/resource";
 import {
   FLAG_META,
@@ -27,21 +27,23 @@ export default function Dashboard() {
     (async () => {
       try {
         const [o, c] = await Promise.all([
-          client.models.Order.list({ limit: 500 }),
-          client.models.OrderItem.list({
-            limit: 200,
-            filter: {
-              or: [
-                { flag: { eq: "CRITICAL_LOW" } },
-                { flag: { eq: "CRITICAL_HIGH" } },
-              ],
-            },
-          }),
+          listAll<Order>((nextToken) =>
+            client.models.Order.list({ limit: 500, nextToken })
+          ),
+          /* فهرس متفرّق على `criticalPending` — يحوي القيم الحرجة غير
+             المُبلَّغ عنها وحدها. البديل السابق كان مسح أول ٢٠٠ صفّ من
+             الجدول ثم التصفية، فيتوقّف التنبيه عن الظهور بصمت بمجرد
+             نمو الجدول. ولا نقصره على اليوم: قيمة حرجة من الأمس لم
+             يُبلَّغ عنها أخطر لا أقل.                                */
+          listAll<Item>((nextToken) =>
+            client.models.OrderItem.listPendingCriticals(
+              { criticalPending: "YES" },
+              { limit: 100, sortDirection: "DESC", nextToken }
+            )
+          ),
         ]);
-        setOrders(o.data ?? []);
-        setCriticals(
-          (c.data ?? []).filter((i) => !i.criticalNotifiedAt && isToday(i.enteredAt))
-        );
+        setOrders(o);
+        setCriticals(c.filter((i) => !i.criticalNotifiedAt));
       } catch (e) {
         setError(String((e as Error)?.message ?? e));
       } finally {
@@ -51,7 +53,10 @@ export default function Dashboard() {
   }, []);
 
   const stats = useMemo(() => {
-    const today = orders.filter((o) => isToday(o.createdAt));
+    // الطلبات الملغاة لا تُحتسب في العدّ ولا في الإيراد
+    const today = orders.filter(
+      (o) => isToday(o.createdAt) && o.status !== "CANCELLED"
+    );
     const pendingReview = orders.filter((o) => o.status === "PENDING_REVIEW");
     const inProgress = orders.filter(
       (o) => o.status === "COLLECTED" || o.status === "IN_PROGRESS"
@@ -120,12 +125,17 @@ export default function Dashboard() {
         <div className="alert danger">
           ⚠️ يوجد {criticals.length} نتيجة بقيمة حرجة لم يُبلَّغ عنها الطبيب بعد.
           <ul style={{ margin: "8px 0 0", paddingInlineStart: 20, fontWeight: 400 }}>
-            {criticals.slice(0, 5).map((c) => (
+            {criticals.slice(0, 8).map((c) => (
               <li key={c.id}>
                 <Link href={`/orders/${c.orderId}`}>
                   {c.testNameAr}: {c.valueNumeric ?? c.valueText} {c.unit ?? ""} (
                   {FLAG_META[(c.flag ?? "ABNORMAL") as Flag].label})
                 </Link>
+                {!isToday(c.enteredAt) && (
+                  <span className="badge critical" style={{ marginInlineStart: 8 }}>
+                    متأخّر منذ {fmtDateTime(c.enteredAt)}
+                  </span>
+                )}
               </li>
             ))}
           </ul>

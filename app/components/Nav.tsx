@@ -44,10 +44,16 @@ export default function Nav() {
         <div className="nav-user">
           <span>
             {session.name || session.email}
-            {session.roles.length > 0 && (
+            {session.roles.length > 0 ? (
               <span className="badge info" style={{ marginInlineStart: 8 }}>
                 {session.roles.map((r) => ROLE_LABEL[r]).join("، ")}
               </span>
+            ) : (
+              session.pending && (
+                <span className="badge warn" style={{ marginInlineStart: 8 }}>
+                  بانتظار صلاحية
+                </span>
+              )
             )}
           </span>
           <button className="btn sm ghost" onClick={signOut}>

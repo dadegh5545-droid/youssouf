@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { audit, client, useSession } from "@/lib/amplify";
+import { audit, client, listAll, useSession } from "@/lib/amplify";
 import type { Schema } from "@/amplify/data/resource";
 import {
   DEPARTMENT_LABEL,
@@ -42,15 +42,20 @@ export default function OrderPage({ params }: { params: { id: string } }) {
       return;
     }
     setOrder(o);
-    const [{ data: p }, { data: its }] = await Promise.all([
+    const [{ data: p }, its] = await Promise.all([
       client.models.Patient.get({ id: o.patientId }),
-      client.models.OrderItem.list({
-        limit: 500,
-        filter: { orderId: { eq: o.id } },
-      }),
+      // استعلام مفهرس على orderId. البديل السابق كان
+      // `list({ filter: { orderId } })` وهو Scan للجدول كله يُطبَّق عليه
+      // الفلتر بعد المسح — فتُفتح الطلبات فارغة بمجرد تجاوز الجدول صفحة.
+      listAll<Item>((nextToken) =>
+        client.models.OrderItem.listOrderItemsByOrder(
+          { orderId: o.id },
+          { limit: 200, nextToken }
+        )
+      ),
     ]);
     setPatient(p ?? null);
-    const sorted = (its ?? []).sort(
+    const sorted = [...its].sort(
       (a, b) => (a.sortOrder ?? 100) - (b.sortOrder ?? 100)
     );
     setItems(sorted);
@@ -102,10 +107,25 @@ export default function OrderPage({ params }: { params: { id: string } }) {
   const filledCount = items.filter((i) => (draft[i.id]?.value ?? "").trim()).length;
   const allFilled = items.length > 0 && filledCount === items.length;
   const criticals = items.filter((i) => isCritical(flagOf(i)));
-  const approved = order?.status === "APPROVED" || order?.status === "DELIVERED";
 
-  const canEnter = session.can("enterResults") && (!approved || session.can("amendApproved"));
-  const canApprove = session.can("approveResults");
+  const approved = order?.status === "APPROVED" || order?.status === "DELIVERED";
+  const cancelled = order?.status === "CANCELLED";
+  const delivered = order?.status === "DELIVERED";
+
+  const canEnter =
+    session.can("enterResults") &&
+    !cancelled &&
+    (!approved || session.can("amendApproved"));
+  const canApprove = session.can("approveResults") && !cancelled;
+  const canManageOrder = session.can("createOrder");
+
+  /* مبدأ «أربع أعين» (ISO 15189): من أدخل النتيجة لا يعتمدها بنفسه.
+     `quality` موجود في enterResults و approveResults معًا، فبلا هذا
+     الفحص يستطيع شخص واحد إدخال نتيجة واعتمادها دون أي مراجعة.     */
+  const selfEntered = items.filter(
+    (i) => i.enteredBy && session.email && i.enteredBy === session.email
+  );
+  const isAdmin = session.roles.includes("admin");
 
   const grouped = useMemo<[string, Item[]][]>(() => {
     const map = new Map<string, Item[]>();
@@ -118,6 +138,22 @@ export default function OrderPage({ params }: { params: { id: string } }) {
 
   async function saveResults() {
     if (!order) return;
+
+    // تعديل تقرير معتمد يستوجب سببًا مكتوبًا — يُطبع على التقرير المصحّح
+    // ويُحفظ في سجل التدقيق.
+    let reason = "";
+    if (approved) {
+      const entered = window.prompt(
+        "هذا التقرير معتمد ومسلَّم للمريض غالبًا.\nاكتب سبب التعديل (يظهر في التقرير المصحّح وسجل التدقيق):"
+      );
+      if (entered === null) return;
+      if (!entered.trim()) {
+        setMsg("التعديل على تقرير معتمد يتطلّب ذكر السبب.");
+        return;
+      }
+      reason = entered.trim();
+    }
+
     setBusy(true);
     setMsg("");
     try {
@@ -146,6 +182,9 @@ export default function OrderPage({ params }: { params: { id: string } }) {
           comment: d.comment || null,
           enteredBy: session.email,
           enteredAt: now,
+          // الفهرس المتفرّق لتنبيه القيم الحرجة في لوحة اليوم
+          criticalPending:
+            isCritical(flag) && !item.criticalNotifiedAt ? "YES" : null,
         });
         if (errors?.length) throw new Error(errors[0].message);
         changed++;
@@ -155,7 +194,9 @@ export default function OrderPage({ params }: { params: { id: string } }) {
           entityId: item.id,
           action: approved ? "RESULT_AMENDED" : "RESULT_ENTERED",
           actor: session.email,
-          summary: `${item.testNameAr}: ${prevValue || "—"} ← ${raw || "—"}`,
+          summary: `${item.testNameAr}: ${prevValue || "—"} ← ${raw || "—"}${
+            reason ? ` (سبب التعديل: ${reason})` : ""
+          }`,
           before: { value: prevValue, flag: item.flag },
           after: { value: raw, flag },
         });
@@ -166,16 +207,33 @@ export default function OrderPage({ params }: { params: { id: string } }) {
         return;
       }
 
-      if (!approved) {
+      if (approved) {
+        const rev = (order.reportRevision ?? 1) + 1;
+        await client.models.Order.update({
+          id: order.id,
+          reportRevision: rev,
+          amendedAt: now,
+          amendedBy: session.name || session.email,
+          amendReason: reason,
+        });
+        await audit({
+          entity: "Order",
+          entityId: order.id,
+          action: "REPORT_AMENDED",
+          actor: session.email,
+          summary: `تعديل تقرير معتمد ${order.orderNo} — مراجعة ${rev}: ${reason}`,
+        });
+        setMsg(`حُفظت ${changed} نتيجة. صدرت مراجعة رقم ${rev} من التقرير.`);
+      } else {
         const nextStatus = allFilled ? "PENDING_REVIEW" : "IN_PROGRESS";
         await client.models.Order.update({ id: order.id, status: nextStatus });
+        setMsg(
+          `حُفظت ${changed} نتيجة.${
+            allFilled ? " الطلب الآن بانتظار الاعتماد." : ""
+          }`
+        );
       }
 
-      setMsg(
-        `حُفظت ${changed} نتيجة.${
-          allFilled && !approved ? " الطلب الآن بانتظار الاعتماد." : ""
-        }`
-      );
       await load();
     } catch (e) {
       setMsg(`تعذّر الحفظ: ${(e as Error).message}`);
@@ -187,25 +245,47 @@ export default function OrderPage({ params }: { params: { id: string } }) {
   async function markCollected() {
     if (!order) return;
     setBusy(true);
-    await client.models.Order.update({
-      id: order.id,
-      status: "COLLECTED",
-      collectedAt: new Date().toISOString(),
-      collectedBy: session.email,
-    });
-    await audit({
-      entity: "Order",
-      entityId: order.id,
-      action: "SAMPLE_COLLECTED",
-      actor: session.email,
-      summary: `سحب عيّنة الطلب ${order.orderNo}`,
-    });
-    await load();
-    setBusy(false);
+    try {
+      await client.models.Order.update({
+        id: order.id,
+        status: "COLLECTED",
+        collectedAt: new Date().toISOString(),
+        collectedBy: session.email,
+      });
+      await audit({
+        entity: "Order",
+        entityId: order.id,
+        action: "SAMPLE_COLLECTED",
+        actor: session.email,
+        summary: `سحب عيّنة الطلب ${order.orderNo}`,
+      });
+      await load();
+    } catch (e) {
+      setMsg(`تعذّرت العملية: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function approve() {
     if (!order) return;
+
+    if (selfEntered.length > 0) {
+      if (!isAdmin) {
+        setMsg(
+          `لا يمكنك اعتماد نتائج أدخلتَها بنفسك (${selfEntered.length} فحص). ` +
+            "يجب أن يعتمدها شخص آخر — هذا شرط مراجعة مستقلّة."
+        );
+        return;
+      }
+      const ok = window.confirm(
+        `أنت من أدخل ${selfEntered.length} من هذه النتائج.\n` +
+          "الاعتماد الذاتي يخالف مبدأ المراجعة المستقلّة وسيُسجَّل صراحةً في سجل التدقيق.\n\n" +
+          "هل تريد المتابعة كمدير؟"
+      );
+      if (!ok) return;
+    }
+
     const pending = criticals.filter((c) => !c.criticalNotifiedAt);
     if (pending.length > 0) {
       const ok = window.confirm(
@@ -213,7 +293,9 @@ export default function OrderPage({ params }: { params: { id: string } }) {
       );
       if (!ok) return;
     }
+
     setBusy(true);
+    setMsg("");
     try {
       const now = new Date().toISOString();
       for (const i of items) {
@@ -234,7 +316,11 @@ export default function OrderPage({ params }: { params: { id: string } }) {
         entityId: order.id,
         action: "ORDER_APPROVED",
         actor: session.email,
-        summary: `اعتماد الطلب ${order.orderNo} (${items.length} فحص)`,
+        summary:
+          `اعتماد الطلب ${order.orderNo} (${items.length} فحص)` +
+          (selfEntered.length > 0
+            ? ` — اعتماد ذاتي بصلاحية مدير لـ ${selfEntered.length} نتيجة أدخلها المعتمِد نفسه`
+            : ""),
       });
       setMsg("تم اعتماد النتائج — التقرير جاهز للطباعة.");
       await load();
@@ -245,24 +331,101 @@ export default function OrderPage({ params }: { params: { id: string } }) {
     }
   }
 
+  async function markDelivered() {
+    if (!order) return;
+    const who = window.prompt(
+      "اسم من استلم التقرير (المريض أو مندوبه):",
+      patient?.fullName ?? ""
+    );
+    if (who === null) return;
+    setBusy(true);
+    try {
+      const now = new Date().toISOString();
+      await client.models.Order.update({
+        id: order.id,
+        status: "DELIVERED",
+        deliveredAt: now,
+        deliveredBy: session.email,
+        deliveredTo: who.trim() || null,
+      });
+      await audit({
+        entity: "Order",
+        entityId: order.id,
+        action: "REPORT_DELIVERED",
+        actor: session.email,
+        summary: `تسليم تقرير ${order.orderNo} إلى ${who.trim() || "—"}`,
+      });
+      setMsg("سُجّل تسليم التقرير.");
+      await load();
+    } catch (e) {
+      setMsg(`تعذّر التسجيل: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancelOrder() {
+    if (!order) return;
+    const reason = window.prompt(
+      `إلغاء الطلب ${order.orderNo}.\nاكتب السبب (عيّنة غير صالحة، طلب مكرّر، انسحاب المريض…):`
+    );
+    if (reason === null) return;
+    if (!reason.trim()) {
+      setMsg("الإلغاء يتطلّب ذكر السبب.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const now = new Date().toISOString();
+      await client.models.Order.update({
+        id: order.id,
+        status: "CANCELLED",
+        cancelledAt: now,
+        cancelledBy: session.email,
+        cancelReason: reason.trim(),
+      });
+      await audit({
+        entity: "Order",
+        entityId: order.id,
+        action: "ORDER_CANCELLED",
+        actor: session.email,
+        summary: `إلغاء الطلب ${order.orderNo}: ${reason.trim()}`,
+      });
+      setMsg("أُلغي الطلب.");
+      await load();
+    } catch (e) {
+      setMsg(`تعذّر الإلغاء: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function notifyCritical(item: Item) {
     const who = window.prompt(
       `اسم الطبيب/الجهة التي أُبلغت بالقيمة الحرجة لفحص «${item.testNameAr}»:`
     );
     if (!who) return;
-    await client.models.OrderItem.update({
-      id: item.id,
-      criticalNotifiedTo: who,
-      criticalNotifiedAt: new Date().toISOString(),
-    });
-    await audit({
-      entity: "OrderItem",
-      entityId: item.id,
-      action: "CRITICAL_NOTIFIED",
-      actor: session.email,
-      summary: `إبلاغ ${who} بقيمة حرجة في ${item.testNameAr}`,
-    });
-    await load();
+    setBusy(true);
+    try {
+      await client.models.OrderItem.update({
+        id: item.id,
+        criticalNotifiedTo: who,
+        criticalNotifiedAt: new Date().toISOString(),
+        criticalPending: null, // يخرج من فهرس التنبيهات المعلّقة
+      });
+      await audit({
+        entity: "OrderItem",
+        entityId: item.id,
+        action: "CRITICAL_NOTIFIED",
+        actor: session.email,
+        summary: `إبلاغ ${who} بقيمة حرجة في ${item.testNameAr}`,
+      });
+      await load();
+    } catch (e) {
+      setMsg(`تعذّر التسجيل: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
   }
 
   if (loading) return <p className="muted">جارٍ التحميل…</p>;
@@ -283,7 +446,12 @@ export default function OrderPage({ params }: { params: { id: string } }) {
           <h1>
             <span className="mono">{order.orderNo}</span>{" "}
             <span className={`badge ${st.tone}`}>{st.label}</span>
-            {order.priority === "URGENT" && (
+            {(order.reportRevision ?? 1) > 1 && (
+              <span className="badge warn" style={{ marginInlineStart: 8 }}>
+                مراجعة {order.reportRevision}
+              </span>
+            )}
+            {order.priority === "URGENT" && !cancelled && (
               <span className="pill-urgent" style={{ marginInlineStart: 8 }}>
                 مستعجل
               </span>
@@ -302,7 +470,7 @@ export default function OrderPage({ params }: { params: { id: string } }) {
           )}
           {canEnter && (
             <button className="btn primary" onClick={saveResults} disabled={busy}>
-              {busy ? "جارٍ الحفظ…" : "حفظ النتائج"}
+              {busy ? "جارٍ الحفظ…" : approved ? "حفظ تعديل معتمد" : "حفظ النتائج"}
             </button>
           )}
           {canApprove && !approved && (
@@ -320,12 +488,29 @@ export default function OrderPage({ params }: { params: { id: string } }) {
               التقرير 🖨️
             </Link>
           )}
+          {order.status === "APPROVED" && canManageOrder && (
+            <button className="btn" onClick={markDelivered} disabled={busy}>
+              تسجيل التسليم
+            </button>
+          )}
+          {!approved && !cancelled && canManageOrder && (
+            <button className="btn ghost" onClick={cancelOrder} disabled={busy}>
+              إلغاء الطلب
+            </button>
+          )}
         </div>
       </div>
 
       {msg && <div className="alert">{msg}</div>}
 
-      {criticals.length > 0 && (
+      {cancelled && (
+        <div className="alert danger">
+          هذا الطلب ملغى — {order.cancelReason || "بلا سبب مسجّل"} · ألغاه{" "}
+          {order.cancelledBy} في {fmtDateTime(order.cancelledAt)}
+        </div>
+      )}
+
+      {criticals.length > 0 && !cancelled && (
         <div className="alert danger">
           ⚠️ قيم حرجة تستوجب إبلاغ الطبيب فورًا:
           <ul style={{ margin: "8px 0 0", paddingInlineStart: 20, fontWeight: 400 }}>
@@ -341,6 +526,7 @@ export default function OrderPage({ params }: { params: { id: string } }) {
                     className="btn sm"
                     style={{ marginInlineStart: 8 }}
                     onClick={() => notifyCritical(c)}
+                    disabled={busy}
                   >
                     تسجيل الإبلاغ
                   </button>
@@ -354,8 +540,27 @@ export default function OrderPage({ params }: { params: { id: string } }) {
       {approved && (
         <div className="alert ok">
           اعتُمد بواسطة {order.approvedBy} — {fmtDateTime(order.approvedAt)}
+          {delivered &&
+            ` · سُلّم إلى ${order.deliveredTo || "—"} في ${fmtDateTime(
+              order.deliveredAt
+            )}`}
           {session.can("amendApproved") &&
-            " · أي تعديل الآن يُسجَّل كتعديل على تقرير معتمد."}
+            " · أي تعديل الآن يرفع رقم مراجعة التقرير ويتطلّب ذكر السبب."}
+          {(order.reportRevision ?? 1) > 1 && order.amendReason && (
+            <div className="small" style={{ fontWeight: 400, marginTop: 6 }}>
+              آخر تعديل ({fmtDateTime(order.amendedAt)}) بواسطة {order.amendedBy}:{" "}
+              {order.amendReason}
+            </div>
+          )}
+        </div>
+      )}
+
+      {canApprove && !approved && selfEntered.length > 0 && (
+        <div className="alert warn">
+          أنت من أدخل {selfEntered.length} من هذه النتائج
+          {isAdmin
+            ? " — الاعتماد الذاتي متاح لك كمدير لكنه يُسجَّل في سجل التدقيق."
+            : " — يلزم أن يعتمدها زميل آخر (مراجعة مستقلّة)."}
         </div>
       )}
 
@@ -504,6 +709,9 @@ export default function OrderPage({ params }: { params: { id: string } }) {
                         {item.verifiedAt && (
                           <div className="small muted">معتمد ✓</div>
                         )}
+                        {item.enteredBy && (
+                          <div className="small muted">أدخلها {item.enteredBy}</div>
+                        )}
                       </td>
                       <td>
                         <input
@@ -530,7 +738,7 @@ export default function OrderPage({ params }: { params: { id: string } }) {
         </table>
       </div>
 
-      {!canEnter && !approved && (
+      {!canEnter && !approved && !cancelled && (
         <p className="muted small" style={{ marginTop: 12 }}>
           صلاحيتك الحالية لا تسمح بإدخال النتائج.
         </p>

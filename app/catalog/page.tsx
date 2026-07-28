@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { client, useSession } from "@/lib/amplify";
+import { client, listAll, useSession } from "@/lib/amplify";
 import type { Schema } from "@/amplify/data/resource";
 import { SEED_TESTS } from "@/lib/seedTests";
 import { DEPARTMENT_LABEL, SEX_LABEL, fmtMoney, rangeLabel } from "@/lib/lab";
@@ -18,8 +18,11 @@ export default function CatalogPage() {
   const [msg, setMsg] = useState("");
 
   async function load() {
-    const res = await client.models.LabTest.list({ limit: 1000 });
-    setTests(res.data ?? []);
+    setTests(
+      await listAll<LabTest>((nextToken) =>
+        client.models.LabTest.list({ limit: 500, nextToken })
+      )
+    );
     setLoading(false);
   }
 

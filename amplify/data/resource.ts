@@ -77,7 +77,7 @@ const schema = a.schema({
       sortOrder: a.integer().default(100),
       active: a.boolean().default(true),
     })
-    .secondaryIndexes((index) => [index("code")])
+    .secondaryIndexes((index) => [index("code").queryField("listLabTestsByCode")])
     .authorization((allow) => [
       allow.groups(["admin"]),
       allow.authenticated().to(["read"]),
@@ -96,7 +96,7 @@ const schema = a.schema({
       notes: a.string(),
       orders: a.hasMany("Order", "patientId"),
     })
-    .secondaryIndexes((index) => [index("mrn")])
+    .secondaryIndexes((index) => [index("mrn").queryField("listPatientsByMrn")])
     .authorization((allow) => [
       allow.groups(["admin", "reception"]),
       allow.groups(["quality", "tech", "doctor"]).to(["read"]),
@@ -118,11 +118,26 @@ const schema = a.schema({
       approvedAt: a.datetime(),
       approvedBy: a.string(),
       deliveredAt: a.datetime(),
+      deliveredBy: a.string(),
+      deliveredTo: a.string(), // من استلم التقرير: المريض أو مندوبه
+      cancelledAt: a.datetime(),
+      cancelledBy: a.string(),
+      cancelReason: a.string(),
+
+      // تعديل تقرير معتمد يرفع رقم المراجعة ويُطبع على التقرير،
+      // حتى تُميَّز النسخة المصحّحة عن النسخة المسلَّمة سابقًا.
+      reportRevision: a.integer().default(1),
+      amendedAt: a.datetime(),
+      amendedBy: a.string(),
+      amendReason: a.string(),
+
       totalPrice: a.float().default(0),
       paidAmount: a.float().default(0),
       discount: a.float().default(0),
     })
-    .secondaryIndexes((index) => [index("orderNo")])
+    .secondaryIndexes((index) => [
+      index("orderNo").queryField("listOrdersByOrderNo"),
+    ])
     .authorization((allow) => [
       allow.groups(["admin", "reception"]),
       allow.groups(["quality", "tech"]).to(["read", "update"]),
@@ -161,15 +176,30 @@ const schema = a.schema({
       verifiedAt: a.datetime(),
       criticalNotifiedTo: a.string(), // اسم من أُبلِغ بالقيمة الحرجة
       criticalNotifiedAt: a.datetime(),
+
+      /* عَلَم مُشتَقّ: "YES" فقط حين تكون النتيجة حرجة ولم يُسجَّل الإبلاغ بعد.
+         سبب وجوده: تنبيه القيم الحرجة في لوحة اليوم كان يمسح الجدول كاملًا
+         (Scan + filter) فيتوقف عن العثور عليها بعد نمو الجدول. هذا الحقل
+         يُنشئ فهرسًا متفرّقًا (sparse index) يحوي الصفوف المعنيّة وحدها.  */
+      criticalPending: a.string(),
     })
-    .secondaryIndexes((index) => [index("testCode")])
+    .secondaryIndexes((index) => [
+      index("testCode"),
+      // فحوصات طلب واحد: استعلام مفهرس بدل مسح الجدول
+      index("orderId").queryField("listOrderItemsByOrder"),
+      index("criticalPending")
+        .sortKeys(["enteredAt"])
+        .queryField("listPendingCriticals"),
+    ])
     .authorization((allow) => [
       allow.groups(["admin", "quality", "tech"]),
       allow.groups(["reception"]).to(["create", "read", "delete"]),
       allow.groups(["doctor"]).to(["read"]),
     ]),
 
-  /* ── سجل التدقيق — يُكتب ولا يُعدَّل ولا يُحذف ─────────────────── */
+  /* ── سجل التدقيق — يُكتب ولا يُعدَّل ولا يُحذف ───────────────────
+     لا أحد — بما في ذلك admin — يملك update أو delete هنا. سجل تدقيق
+     يستطيع المدير محوه لا يصلح دليلًا عند مراجعة أو نزاع.           */
   AuditLog: a
     .model({
       entity: a.string().required(), // Order | OrderItem | Patient
@@ -180,10 +210,7 @@ const schema = a.schema({
       before: a.json(),
       after: a.json(),
     })
-    .authorization((allow) => [
-      allow.authenticated().to(["create", "read"]),
-      allow.groups(["admin"]).to(["create", "read", "delete"]),
-    ]),
+    .authorization((allow) => [allow.authenticated().to(["create", "read"])]),
 });
 
 export type Schema = ClientSchema<typeof schema>;

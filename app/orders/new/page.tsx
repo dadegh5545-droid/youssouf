@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { audit, client, useSession } from "@/lib/amplify";
+import { audit, client, listAll, reserveOrderNo, useSession } from "@/lib/amplify";
 import type { Schema } from "@/amplify/data/resource";
 import {
   DEPARTMENT_LABEL,
@@ -48,11 +48,15 @@ function NewOrder() {
   useEffect(() => {
     (async () => {
       const [p, t] = await Promise.all([
-        client.models.Patient.list({ limit: 1000 }),
-        client.models.LabTest.list({ limit: 1000 }),
+        listAll<Patient>((nextToken) =>
+          client.models.Patient.list({ limit: 500, nextToken })
+        ),
+        listAll<LabTest>((nextToken) =>
+          client.models.LabTest.list({ limit: 500, nextToken })
+        ),
       ]);
-      setPatients(p.data ?? []);
-      setTests((t.data ?? []).filter((x) => x.active !== false));
+      setPatients(p);
+      setTests(t.filter((x) => x.active !== false));
     })().catch((e) => setMsg(String(e)));
   }, []);
 
@@ -126,7 +130,9 @@ function NewOrder() {
     setSaving(true);
     setMsg("");
     try {
-      const orderNo = newOrderNo();
+      // رقم الطلب يُطبع على الباركود الملصق على الأنبوب: نتحقق من عدم
+      // وجوده قبل الإنشاء. الفهرس الثانوي ليس قيد تفرّد في DynamoDB.
+      const orderNo = await reserveOrderNo(newOrderNo);
       const { data: order, errors } = await client.models.Order.create({
         orderNo,
         patientId: patient.id,
@@ -144,27 +150,40 @@ function NewOrder() {
       const age = ageInYears(patient.birthDate);
       const items = expand(picked);
 
-      for (const t of items) {
-        // المدى المرجعي يُجمَّد الآن حسب جنس المريض وعمره،
-        // حتى لا يتغيّر التقرير إذا عُدّل الكتالوج لاحقًا.
-        const r = pickRange(t.ranges ?? [], patient.sex as "MALE" | "FEMALE", age);
-        const { errors: itemErrors } = await client.models.OrderItem.create({
-          orderId: order.id,
-          testCode: t.code,
-          testNameAr: t.nameAr,
-          department: t.department,
-          resultType: t.resultType,
-          unit: t.unit,
-          options: t.options,
-          price: t.price ?? 0,
-          refLow: r?.low ?? undefined,
-          refHigh: r?.high ?? undefined,
-          refText: rangeLabel(r?.low, r?.high, r?.text),
-          criticalLow: t.criticalLow,
-          criticalHigh: t.criticalHigh,
-          sortOrder: t.sortOrder,
+      try {
+        for (const t of items) {
+          // المدى المرجعي يُجمَّد الآن حسب جنس المريض وعمره،
+          // حتى لا يتغيّر التقرير إذا عُدّل الكتالوج لاحقًا.
+          const r = pickRange(t.ranges ?? [], patient.sex as "MALE" | "FEMALE", age);
+          const { errors: itemErrors } = await client.models.OrderItem.create({
+            orderId: order.id,
+            testCode: t.code,
+            testNameAr: t.nameAr,
+            department: t.department,
+            resultType: t.resultType,
+            unit: t.unit,
+            options: t.options,
+            price: t.price ?? 0,
+            refLow: r?.low ?? undefined,
+            refHigh: r?.high ?? undefined,
+            refText: rangeLabel(r?.low, r?.high, r?.text),
+            criticalLow: t.criticalLow,
+            criticalHigh: t.criticalHigh,
+            sortOrder: t.sortOrder,
+          });
+          if (itemErrors?.length) throw new Error(itemErrors[0].message);
+        }
+      } catch (itemErr) {
+        // لا معاملات (transactions) هنا: الطلب أُنشئ لكن فحوصاته ناقصة.
+        // نلغيه بدل تركه في قائمة العمل بفحوصات جزئية تُعتمد وتُطبع.
+        await client.models.Order.update({
+          id: order.id,
+          status: "CANCELLED",
+          cancelledAt: new Date().toISOString(),
+          cancelledBy: session.email,
+          cancelReason: `فشل إنشاء فحوصات الطلب: ${(itemErr as Error).message}`,
         });
-        if (itemErrors?.length) throw new Error(itemErrors[0].message);
+        throw itemErr;
       }
 
       await audit({

@@ -5,6 +5,7 @@ import { I18n } from "aws-amplify/utils";
 import "@aws-amplify/ui-react/styles.css";
 import "@/lib/amplify"; // يُهيّئ Amplify.configure مرة واحدة
 import Nav from "./components/Nav";
+import PendingBanner from "./components/PendingBanner";
 
 I18n.putVocabularies(translations);
 I18n.setLanguage("ar");
@@ -26,7 +27,10 @@ export default function Providers({ children }: { children: React.ReactNode }) {
   return (
     <Authenticator variation="modal" signUpAttributes={["name"]}>
       <Nav />
-      <div className="container">{children}</div>
+      <div className="container">
+        <PendingBanner />
+        {children}
+      </div>
     </Authenticator>
   );
 }

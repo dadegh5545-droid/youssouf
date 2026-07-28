@@ -59,13 +59,23 @@ export function pickRange(
   });
 
   if (!matches.length) return list[0];
-  // الأكثر تخصيصًا أولًا: المطابق للجنس ثم المطابق للعمر
+  // الأكثر تخصيصًا أولًا.
   matches.sort((a, b) => specificity(b) - specificity(a));
   return matches[0];
 }
 
+/**
+ * وزن العمر (٢) أعلى من وزن الجنس (١) — عن قصد.
+ *
+ * الفروق الفسيولوجية بين طفل وبالغ أكبر بكثير من الفروق بين ذكر وأنثى،
+ * والفروق بين الجنسين لا تظهر أصلًا قبل البلوغ. حين كان وزن الجنس أعلى
+ * كان مدى البالغين يهزم مدى الأطفال: طفل هيموغلوبينه ١٢ (طبيعي لعمره)
+ * يُعلَّم «منخفض»، وطفل كرياتينينه ١.٠ (مرتفع فعليًا) يظهر «طبيعي».
+ */
 function specificity(r: Range): number {
-  return (r.sex ? 2 : 0) + (r.ageMinYears != null || r.ageMaxYears != null ? 1 : 0);
+  const byAge = r.ageMinYears != null || r.ageMaxYears != null ? 2 : 0;
+  const bySex = r.sex ? 1 : 0;
+  return byAge + bySex;
 }
 
 export function rangeLabel(
@@ -156,39 +166,83 @@ export const PRIORITY_LABEL: Record<string, string> = {
 
 /* ── أرقام وتواريخ ─────────────────────────────────────────── */
 
-const CODE_CHARS = "0123456789";
-
+/**
+ * أرقام عشوائية بجودة تشفيرية حين تتوفر (المتصفح والـ Node الحديث).
+ * `Math.random` رديء التوزيع ومتوقَّع، ورقم الطلب يُطبع على الباركود
+ * الملصق على الأنبوب — تصادمه يعني نسبة نتائج مريض إلى مريض آخر.
+ */
 function randomDigits(n: number): string {
+  const g =
+    typeof globalThis !== "undefined"
+      ? (globalThis.crypto as Crypto | undefined)
+      : undefined;
   let out = "";
-  for (let i = 0; i < n; i++) {
-    out += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)];
+  if (g?.getRandomValues) {
+    const buf = new Uint32Array(n);
+    g.getRandomValues(buf);
+    for (let i = 0; i < n; i++) out += String(buf[i] % 10);
+    return out;
   }
+  for (let i = 0; i < n; i++) out += String(Math.floor(Math.random() * 10));
   return out;
 }
 
-/** LAB-260727-4831 */
+/**
+ * ٦ خانات = مليون احتمال في اليوم بدل ١٠٬٠٠٠.
+ * التفرّد الفعلي مضمون بفحص الرقم قبل الإنشاء في `reserveOrderNo`
+ * (lib/amplify.ts)؛ هذه الخانات تجعل إعادة المحاولة نادرة جدًا.
+ *
+ * مثال: LAB-260728-482913
+ */
 export function newOrderNo(): string {
   const d = new Date();
   const stamp =
     String(d.getFullYear()).slice(2) +
     String(d.getMonth() + 1).padStart(2, "0") +
     String(d.getDate()).padStart(2, "0");
-  return `LAB-${stamp}-${randomDigits(4)}`;
+  return `LAB-${stamp}-${randomDigits(6)}`;
 }
 
-/** P-25073-8419 */
+/** P-2607-482913 — يُتحقَّق من تفرّده في `reserveMrn`. */
 export function newMrn(): string {
   const d = new Date();
   const stamp =
     String(d.getFullYear()).slice(2) + String(d.getMonth() + 1).padStart(2, "0");
-  return `P-${stamp}-${randomDigits(4)}`;
+  return `P-${stamp}-${randomDigits(6)}`;
 }
+
+/* ── رمز التحقق المطبوع على التقرير ────────────────────────────
+   بصمة قصيرة (FNV-1a معدّلة) على الحقول التي تهمّ: رقم الطلب، رقم
+   الملف، وقت الاعتماد، رقم المراجعة، وكل قيمة نتيجة. تغيير أي رقم
+   في نسخة مطبوعة يجعل الرمز لا يطابق ما يعرضه النظام.
+
+   ملاحظة: هذا كاشف تلاعب/خطأ نسخ، وليس توقيعًا رقميًا — من يملك
+   الكود يستطيع إعادة احتسابه. للتوقيع الحقيقي يلزم مفتاح خادم.   */
+
+export function verificationCode(parts: (string | number | null | undefined)[]): string {
+  const s = parts.map((p) => (p == null ? "" : String(p))).join("|");
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 + c, 0x85ebca6b) >>> 0;
+  }
+  const raw = h1.toString(36).padStart(7, "0") + h2.toString(36).padStart(7, "0");
+  return raw.toUpperCase().slice(0, 10);
+}
+
+/* لغة عربية بأرقام لاتينية: `-u-nu-latn` يمنع الأرقام الهندية (١٢٣).
+   السبب عملي لا جمالي — أرقام الطلبات والملفات والنتائج المخبرية كلها
+   لاتينية، وخلطها بأرقام هندية في نفس الصفّ يربك القراءة السريعة. */
+const LOCALE = "ar-SA-u-nu-latn";
 
 export function fmtDateTime(iso?: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString("ar-EG", {
+  return d.toLocaleString(LOCALE, {
+    calendar: "gregory",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -201,7 +255,8 @@ export function fmtDate(iso?: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("ar-EG", {
+  return d.toLocaleDateString(LOCALE, {
+    calendar: "gregory",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -209,7 +264,7 @@ export function fmtDate(iso?: string | null): string {
 }
 
 export function fmtMoney(v?: number | null): string {
-  return `${(v ?? 0).toLocaleString("ar-EG", { maximumFractionDigits: 2 })} ر.س`;
+  return `${(v ?? 0).toLocaleString(LOCALE, { maximumFractionDigits: 2 })} ر.س`;
 }
 
 export function isToday(iso?: string | null): boolean {
