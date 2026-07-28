@@ -3,7 +3,7 @@
 import { Fragment, Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { client, listAll } from "@/lib/amplify";
+import { client, listAll, parseJson } from "@/lib/amplify";
 import { useLabConfig } from "@/lib/config";
 import type { Schema } from "@/amplify/data/resource";
 import {
@@ -41,6 +41,10 @@ function ReportPage() {
   const { labName } = useLabConfig();
   const params = useSearchParams();
   const orderId = params.get("id") ?? "";
+  /* مسار المريض: رقم الطلب + الرقم المُتحقِّق في العنوان بدل معرّف
+     داخلي، لأن الزائر لا يملك قراءة الجداول — الخادم وحده يجلب له. */
+  const lookupNo = params.get("no") ?? "";
+  const lookupVerify = params.get("v") ?? "";
   const [order, setOrder] = useState<Order | null>(null);
   const [patient, setPatient] = useState<Patient | null>(null);
   const [items, setItems] = useState<Item[]>([]);
@@ -48,6 +52,22 @@ function ReportPage() {
 
   useEffect(() => {
     (async () => {
+      // الزائر: كل شيء عبر بوابة واحدة تتحقّق من الرقمين على الخادم.
+      if (lookupNo && lookupVerify) {
+        const res = await client.queries.getMyReport({
+          orderNo: lookupNo,
+          verifyId: lookupVerify,
+        });
+        const payload = parseJson<{ status: string; order: Order; patient: Patient; items: Item[] }>(res.data);
+        if (payload?.status === "OK") {
+          setOrder(payload.order as Order);
+          setPatient(payload.patient as Patient);
+          setItems(payload.items as Item[]);
+        }
+        setLoading(false);
+        return;
+      }
+
       if (!orderId) {
         setLoading(false);
         return;
@@ -74,7 +94,7 @@ function ReportPage() {
       );
       setLoading(false);
     })().catch(() => setLoading(false));
-  }, [orderId]);
+  }, [orderId, lookupNo, lookupVerify]);
 
   const grouped = useMemo<[string, Item[]][]>(() => {
     const map = new Map<string, Item[]>();
@@ -114,9 +134,16 @@ function ReportPage() {
   return (
     <>
       <div className="row no-print" style={{ marginBottom: 16 }}>
-        <Link href={`/orders/view?id=${order.id}`} className="btn">
-          ← رجوع للطلب
-        </Link>
+        {/* الزائر يعود إلى بحثه، والموظف إلى الطلب — صفحة الطلب محجوبة عنه. */}
+        {lookupNo ? (
+          <Link href="/" className="btn">
+            ← بحث جديد
+          </Link>
+        ) : (
+          <Link href={`/orders/view?id=${order.id}`} className="btn">
+            ← رجوع للطلب
+          </Link>
+        )}
         <button className="btn primary" onClick={() => window.print()}>
           🖨️ طباعة / حفظ PDF
         </button>

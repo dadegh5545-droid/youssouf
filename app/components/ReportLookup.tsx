@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { client } from "@/lib/amplify";
+import { client, parseJson } from "@/lib/amplify";
 import { useLabConfig } from "@/lib/config";
 import { STATUS_META, fmtDateTime } from "@/lib/lab";
 
@@ -39,42 +39,29 @@ export default function ReportLookup() {
 
     setBusy(true);
     try {
-      const { data, errors } = await client.models.Order.listOrdersByOrderNo(
-        { orderNo: no },
-        { limit: 1 }
-      );
-      if (errors?.length) throw new Error(errors[0].message);
-      const order = data?.[0];
+      // استعلام واحد يتحقّق من الرقمين على الخادم. الزائر لا يقرأ
+      // الجداول مباشرةً، فلا سبيل لتصفّح طلبات غيره.
+      const res = await client.queries.getMyReport({ orderNo: no, verifyId: id });
+      if (res.errors?.length) throw new Error(res.errors[0].message);
+      const payload = parseJson<{ status: string; orderStatus?: string; createdAt?: string }>(res.data);
 
-      // رسالة واحدة لعدم وجود الطلب ولعدم تطابق الرقم الثاني: التفريق
-      // بينهما يكشف أي أرقام طلبات موجودة فعلًا.
-      const mismatch = "لا يوجد تقرير بهذه البيانات. تحقّق من الرقمين في إيصالك.";
-      if (!order) {
-        setError(mismatch);
-        return;
-      }
-
-      const { data: patient } = await client.models.Patient.get({
-        id: order.patientId,
-      });
-      const matches =
-        patient?.mrn?.trim() === id ||
-        patient?.phone?.trim().replace(/\s/g, "") === id.replace(/\s/g, "");
-      if (!matches) {
-        setError(mismatch);
-        return;
-      }
-
-      if (order.status !== "APPROVED" && order.status !== "DELIVERED") {
-        const st = STATUS_META[order.status ?? ""];
+      if (payload?.status === "PENDING") {
+        const st = STATUS_META[payload.orderStatus ?? ""];
         setInfo(
-          `تقريرك لم يُعتمد بعد — الحالة الآن: ${st?.label ?? order.status}. ` +
-            `سُجّل الطلب ${fmtDateTime(order.createdAt)}. جرّب لاحقًا أو راجع الاستقبال.`
+          `تقريرك لم يُعتمد بعد — الحالة الآن: ${st?.label ?? payload.orderStatus}. ` +
+            `سُجّل الطلب ${fmtDateTime(payload.createdAt)}. جرّب لاحقًا أو راجع الاستقبال.`
         );
         return;
       }
 
-      router.push(`/orders/report?id=${order.id}`);
+      if (payload?.status !== "OK") {
+        setError("لا يوجد تقرير بهذه البيانات. تحقّق من الرقمين في إيصالك.");
+        return;
+      }
+
+      router.push(
+        `/orders/report?no=${encodeURIComponent(no)}&v=${encodeURIComponent(id)}`
+      );
     } catch (e) {
       setError(`تعذّر البحث: ${(e as Error).message}`);
     } finally {

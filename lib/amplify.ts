@@ -62,6 +62,20 @@ if (typeof window !== "undefined") {
   });
 }
 
+/* حقل `AWSJSON` يصل نصًا، وقد يصل نصًا داخل نص لأن الدالة تُرجع
+   `JSON.stringify` ثم يغلّفه AppSync مرة أخرى. فكّ مرتين على الأكثر. */
+export function parseJson<T>(raw: unknown): T | null {
+  let value: unknown = raw;
+  for (let i = 0; i < 2 && typeof value === "string"; i++) {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  return (value ?? null) as T | null;
+}
+
 export type Role = "admin" | "quality" | "tech" | "reception" | "doctor";
 
 export const ROLE_LABEL: Record<Role, string> = {

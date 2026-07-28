@@ -1,4 +1,5 @@
 import { type ClientSchema, a, defineData } from "@aws-amplify/backend";
+import { getMyReport } from "../functions/get-my-report/resource";
 
 /**
  * نموذج بيانات نظام إدارة المختبر الطبي (LIS).
@@ -80,7 +81,6 @@ const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("code").queryField("listLabTestsByCode")])
     .authorization((allow) => [
-      allow.guest().to(["read"]), // الزائر: قراءة فقط للبحث عن تقريره
       allow.groups(["admin"]),
       allow.authenticated().to(["read"]),
     ]),
@@ -101,7 +101,7 @@ const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("key").queryField("listLabConfigByKey")])
     .authorization((allow) => [
-      allow.guest().to(["read"]), // الزائر يقرأ الكتالوج فقط
+      allow.guest().to(["read"]), // اسم المختبر والعملة في ترويسة التقرير
       allow.groups(["admin"]),
       allow.authenticated().to(["read"]),
     ]),
@@ -121,7 +121,6 @@ const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("mrn").queryField("listPatientsByMrn")])
     .authorization((allow) => [
-      allow.guest().to(["read"]), // الزائر: قراءة فقط للبحث عن تقريره
       allow.groups(["admin", "reception"]),
       allow.groups(["quality", "tech", "doctor"]).to(["read"]),
     ]),
@@ -163,7 +162,6 @@ const schema = a.schema({
       index("orderNo").queryField("listOrdersByOrderNo"),
     ])
     .authorization((allow) => [
-      allow.guest().to(["read"]), // الزائر: قراءة فقط للبحث عن تقريره
       allow.groups(["admin", "reception"]),
       allow.groups(["quality", "tech"]).to(["read", "update"]),
       allow.groups(["doctor"]).to(["read"]),
@@ -217,7 +215,6 @@ const schema = a.schema({
         .queryField("listPendingCriticals"),
     ])
     .authorization((allow) => [
-      allow.guest().to(["read"]), // الزائر: قراءة فقط للبحث عن تقريره
       allow.groups(["admin", "quality", "tech"]),
       allow.groups(["reception"]).to(["create", "read", "delete"]),
       allow.groups(["doctor"]).to(["read"]),
@@ -240,7 +237,26 @@ const schema = a.schema({
       // الزائر لا يكتب ولا يقرأ سجل التدقيق — لا شأن له به.
       allow.authenticated().to(["create", "read"]),
     ]),
-});
+
+  /* ── بوابة تقرير المريض ──────────────────────────────────────
+     المنفذ الوحيد للزائر إلى بيانات الطلبات. لا يملك الزائر `read`
+     على `Order` ولا `Patient` ولا `OrderItem`، لأن صلاحيات AppSync
+     على مستوى الجدول: منحه القراءة يعني قراءة طلبات الناس جميعًا من
+     خارج الواجهة. هنا يتحقّق الخادم من رقم الطلب ورقم الملف/الجوال
+     معًا، ولا يُرجع إلا تقريرًا معتمدًا يخصّ صاحب الرقمين.       */
+  getMyReport: a
+    .query()
+    .arguments({
+      orderNo: a.string().required(),
+      verifyId: a.string().required(), // رقم الملف أو الجوال
+    })
+    .returns(a.json())
+    .handler(a.handler.function(getMyReport))
+    .authorization((allow) => [allow.guest(), allow.authenticated()]),
+})
+  // الدالة تقرأ الجداول بالنيابة عن الزائر بعد التحقّق، فتحتاج صلاحية
+  // استعلام على المخطط — وهي وحدها، لا الزائر.
+  .authorization((allow) => [allow.resource(getMyReport).to(["query"])]);
 
 export type Schema = ClientSchema<typeof schema>;
 
