@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ExecutionPolicy -List)",
+      "PowerShell($src=\"c:\\\\Users\\\\DELL\\\\Desktop\\\\youssouf\\\\youssouf\"; $dst=\"c:\\\\Users\\\\DELL\\\\Desktop\\\\youssouf\\\\lab-lis-source.zip\"; $items=Get-ChildItem $src -Force | Where-Object { $_.Name -notin @\\('node_modules','.next','.amplify','amplify_outputs.json','package-lock.json'\\) }; if \\(Test-Path $dst\\) { Remove-Item $dst -Force }; Compress-Archive -Path $items.FullName -DestinationPath $dst -CompressionLevel Optimal; \\(Get-Item $dst\\).Length)",
+      "PowerShell($r=@{}; $r.awsCli = try { \\(aws --version\\) 2>&1 | Out-String } catch { \"NOT INSTALLED\" }; $r.credFile = Test-Path \"$env:USERPROFILE\\\\.aws\\\\credentials\"; $r.configFile = Test-Path \"$env:USERPROFILE\\\\.aws\\\\config\"; $r.envKey = [bool]$env:AWS_ACCESS_KEY_ID; $r | Format-List)",
+      "PowerShell($o=@{}; $o.git = try { \\(git --version\\) 2>&1 | Out-String } catch { \"NO\" }; $o.gh = try { \\(gh --version\\) 2>&1 | Select-Object -First 1 | Out-String } catch { \"NO\" }; $o.ghAuth = try { \\(gh auth status\\) 2>&1 | Out-String } catch { \"NO\" }; $o.winget = try { \\(winget --version\\) 2>&1 | Out-String } catch { \"NO\" }; $o | Format-List)",
+      "PowerShell(winget install --id Amazon.AWSCLI --exact --silent --accept-package-agreements --accept-source-agreements 2>&1)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); aws --version)",
+      "PowerShell($env:Path = [Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Write-Output \"credFile: $\\(Test-Path \"$env:USERPROFILE\\\\.aws\\\\credentials\"\\)\"; aws sts get-caller-identity --output json)",
+      "Bash(break)",
+      "PowerShell(try { $v = aws --version; \"AWS CLI: $v\" } catch { \"AWS CLI missing\" }; try { aws sts get-caller-identity --output json } catch { \"NO CREDENTIALS\" }; \"region: \" + \\(aws configure get region\\))",
+      "PowerShell(aws sts get-caller-identity --output json; \"region: \" + \\(aws configure get region\\))",
+      "PowerShell($p = \"$env:USERPROFILE\\\\.aws\"; if \\(Test-Path $p\\) { \"exists: $p\"; Get-ChildItem $p -Force | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize | Out-String } else { \"no .aws directory at $p\" }; \"AWS_PROFILE=$env:AWS_PROFILE\"; \"AWS_ACCESS_KEY_ID set: \" + [bool]$env:AWS_ACCESS_KEY_ID)",
+      "PowerShell(cd \"c:\\\\Users\\\\DELL\\\\Desktop\\\\youssouf\\\\youssouf\"; git status --porcelain; echo \"--- count ---\"; \\(git status --porcelain | Measure-Object -Line\\).Lines)"
+    ]
+  }
+}
