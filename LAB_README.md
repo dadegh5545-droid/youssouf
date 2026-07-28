@@ -7,6 +7,12 @@
    ← علَم تلقائي (طبيعي / مرتفع / منخفض / حرج) ← اعتماد ← تقرير قابل للطباعة
 ```
 
+**الموقع المنشور:** <https://main.d1mvwoi85qfdt.amplifyapp.com>
+(Amplify Hosting · منطقة `us-east-2` · نشر يدوي من مجلد `out/`؛ الباكند في
+`us-east-1`). لتحديثه: `npm run build` ثم ارفع محتوى `out/` عبر
+`aws amplify create-deployment` — أو اربط المستودع بالفرع `main` من لوحة
+Amplify ليبني تلقائيًا عند كل دفع.
+
 ## التشغيل
 
 ```bash
