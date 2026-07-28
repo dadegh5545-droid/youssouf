@@ -2,12 +2,13 @@
 
 import { translations } from "@aws-amplify/ui-react";
 import { I18n } from "aws-amplify/utils";
+import { usePathname } from "next/navigation";
 import "@aws-amplify/ui-react/styles.css";
-import "@/lib/amplify"; // يُهيّئ Amplify.configure مرة واحدة
+import { useSession } from "@/lib/amplify"; // يُهيّئ Amplify.configure مرة واحدة
 import { LabConfigProvider } from "@/lib/config";
 import Nav from "./components/Nav";
 import PendingBanner from "./components/PendingBanner";
-import WelcomeBanner from "./components/WelcomeBanner";
+import StaffOnly from "./components/StaffOnly";
 
 I18n.putVocabularies(translations);
 I18n.setLanguage("ar");
@@ -25,23 +26,42 @@ I18n.putVocabulariesForLanguage("ar", {
   "Forgot your password?": "نسيت كلمة المرور؟",
 });
 
+/* الصفحات المسموحة للزائر: البحث عن تقريره، التقرير نفسه، وشاشة الدخول.
+   ما عداها للموظفين. */
+const GUEST_PATHS = ["/", "/login", "/orders/report"];
+
+const isGuestPath = (pathname: string) =>
+  GUEST_PATHS.includes(pathname.replace(/\/+$/, "") || "/");
+
 /**
- * لا بوابة تسجيل دخول: التطبيق يُفتح مباشرة للزائر.
+ * لا بوابة تسجيل دخول على مستوى التطبيق: الزائر يدخل مباشرة إلى البحث عن
+ * تقريره. والحجب يتم هنا في نقطة واحدة لا داخل كل صفحة — صفحة جديدة
+ * تُضاف لاحقًا تكون محجوبة عن الزائر تلقائيًا، وهو الخطأ الآمن.
  *
- * كان `<Authenticator>` يلفّ كل شيء فلا يظهر أي محتوى قبل الدخول. الآن
- * الزائر يدخل ويجرّب كل الصفحات (الخادم يسمح له عبر `allow.guest()`)،
- * وتسجيل الدخول اختياري من `/login` لمن يريد أن يُسجَّل اسمه في
- * سجل التدقيق ويعمل ضمن دوره.
+ * هذا حجب واجهة فقط؛ التطبيق الفعلي في قواعد `authorization` بالمخطط:
+ * الزائر لا يملك إلا `read`.
  */
 export default function Providers({ children }: { children: React.ReactNode }) {
   return (
     <LabConfigProvider>
       <Nav />
       <div className="container">
-        <WelcomeBanner />
         <PendingBanner />
-        {children}
+        <Gate>{children}</Gate>
       </div>
     </LabConfigProvider>
   );
+}
+
+function Gate({ children }: { children: React.ReactNode }) {
+  const session = useSession();
+  const pathname = usePathname() || "/";
+
+  // قبل معرفة الجلسة لا نعرض المحتوى ولا لافتة الحجب: أيّهما ظهر ثم
+  // انقلب أحدث وميضًا مربكًا.
+  if (session.loading && !isGuestPath(pathname)) {
+    return <p className="muted">جارٍ التحميل…</p>;
+  }
+  if (session.guest && !isGuestPath(pathname)) return <StaffOnly />;
+  return <>{children}</>;
 }

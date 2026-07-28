@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { client, listAll } from "@/lib/amplify";
+import { client, listAll, useSession } from "@/lib/amplify";
+import ReportLookup from "./components/ReportLookup";
 import type { Schema } from "@/amplify/data/resource";
 import {
   FLAG_META,
@@ -17,7 +18,18 @@ import {
 type Order = Schema["Order"]["type"];
 type Item = Schema["OrderItem"]["type"];
 
-export default function Dashboard() {
+/**
+ * الصفحة الأولى تختلف باختلاف من يفتحها: الزائر يرى البحث عن تقريره،
+ * والموظف يرى لوحة اليوم. لوحة اليوم تقرأ كل الطلبات، فلا يجوز أن
+ * تُركَّب أصلًا للزائر.
+ */
+export default function Home() {
+  const session = useSession();
+  if (session.loading) return <p className="muted">جارٍ التحميل…</p>;
+  return session.guest ? <ReportLookup /> : <Dashboard />;
+}
+
+function Dashboard() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [criticals, setCriticals] = useState<Item[]>([]);
   const [loading, setLoading] = useState(true);

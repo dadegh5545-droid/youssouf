@@ -38,7 +38,8 @@ export default function Nav() {
           <span>{labName}</span>
         </Link>
 
-        {TABS.map((t) => (
+        {/* الزائر لا يرى تبويبات الموظفين — صفحته الوحيدة هي تقريره. */}
+        {(session.guest ? [] : TABS).map((t) => (
           <Link
             key={t.href}
             href={t.href}
@@ -53,12 +54,10 @@ export default function Nav() {
         <div className="nav-user">
           {session.guest ? (
             <>
-              <span>
-                أهلًا بك 👋
-                <span className="badge muted" style={{ marginInlineStart: 8 }}>
-                  زائر
-                </span>
-              </span>
+              <span>أهلًا بك 👋</span>
+              <Link href="/" className="btn sm ghost">
+                تقريري
+              </Link>
               <Link href="/login" className="btn sm ghost">
                 تسجيل الدخول
               </Link>

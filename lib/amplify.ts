@@ -184,10 +184,10 @@ export function useSession(): Session {
     // الأزرار وتظهر له لافتة تشرح أنه بانتظار تعيين صلاحية.
     // الزائر مستثنى: ليس بانتظار شيء — هذا وضعه الطبيعي.
     pending: !state.loading && !state.guest && state.roles.length === 0,
-    // الزائر يجرّب كل شيء (الخادم يسمح له عبر `allow.guest()`)، وإلا
-    // لرأى تطبيقًا فارغًا بلا أزرار.
+    // الزائر لا يملك أي إجراء: دوره البحث عن تقريره وقراءته فقط،
+    // والخادم لا يمنحه إلا `read`.
     can: (action) =>
-      state.guest || state.roles.some((r) => MATRIX[action].includes(r)),
+      !state.guest && state.roles.some((r) => MATRIX[action].includes(r)),
   };
 }
 

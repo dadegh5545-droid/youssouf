@@ -144,9 +144,7 @@ function OrderPage() {
   const selfEntered = items.filter(
     (i) => i.enteredBy && session.actor && i.enteredBy === session.actor
   );
-  // الزائر مستثنى: كل الزوار يحملون الاسم نفسه («زائر»)، فقاعدة «أربع
-  // أعين» ستمنع اعتماد أي نتيجة أدخلها زائر آخر — أي جمود كامل.
-  const isAdmin = session.roles.includes("admin") || session.guest;
+  const isAdmin = session.roles.includes("admin");
 
   const grouped = useMemo<[string, Item[]][]>(() => {
     const map = new Map<string, Item[]>();

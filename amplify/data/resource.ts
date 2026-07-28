@@ -80,7 +80,7 @@ const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("code").queryField("listLabTestsByCode")])
     .authorization((allow) => [
-      allow.guest(), // وضع مفتوح: الزائر بلا تسجيل دخول
+      allow.guest().to(["read"]), // الزائر: قراءة فقط للبحث عن تقريره
       allow.groups(["admin"]),
       allow.authenticated().to(["read"]),
     ]),
@@ -101,7 +101,7 @@ const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("key").queryField("listLabConfigByKey")])
     .authorization((allow) => [
-      allow.guest(), // وضع مفتوح: الزائر بلا تسجيل دخول
+      allow.guest().to(["read"]), // الزائر يقرأ الكتالوج فقط
       allow.groups(["admin"]),
       allow.authenticated().to(["read"]),
     ]),
@@ -121,7 +121,7 @@ const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("mrn").queryField("listPatientsByMrn")])
     .authorization((allow) => [
-      allow.guest(), // وضع مفتوح: الزائر بلا تسجيل دخول
+      allow.guest().to(["read"]), // الزائر: قراءة فقط للبحث عن تقريره
       allow.groups(["admin", "reception"]),
       allow.groups(["quality", "tech", "doctor"]).to(["read"]),
     ]),
@@ -163,7 +163,7 @@ const schema = a.schema({
       index("orderNo").queryField("listOrdersByOrderNo"),
     ])
     .authorization((allow) => [
-      allow.guest(), // وضع مفتوح: الزائر بلا تسجيل دخول
+      allow.guest().to(["read"]), // الزائر: قراءة فقط للبحث عن تقريره
       allow.groups(["admin", "reception"]),
       allow.groups(["quality", "tech"]).to(["read", "update"]),
       allow.groups(["doctor"]).to(["read"]),
@@ -217,7 +217,7 @@ const schema = a.schema({
         .queryField("listPendingCriticals"),
     ])
     .authorization((allow) => [
-      allow.guest(), // وضع مفتوح: الزائر بلا تسجيل دخول
+      allow.guest().to(["read"]), // الزائر: قراءة فقط للبحث عن تقريره
       allow.groups(["admin", "quality", "tech"]),
       allow.groups(["reception"]).to(["create", "read", "delete"]),
       allow.groups(["doctor"]).to(["read"]),
@@ -237,7 +237,7 @@ const schema = a.schema({
       after: a.json(),
     })
     .authorization((allow) => [
-      allow.guest().to(["create", "read"]), // الزائر يُسجَّل باسم «زائر»
+      // الزائر لا يكتب ولا يقرأ سجل التدقيق — لا شأن له به.
       allow.authenticated().to(["create", "read"]),
     ]),
 });
@@ -249,10 +249,12 @@ export const data = defineData({
   authorizationModes: {
     // المسجَّلون يستخدمون رمز Cognito، فتبقى قواعد المجموعات (الأدوار)
     // سارية عليهم. الزائر بلا حساب يمرّ عبر دور IAM غير المُصادَق
-    // (identityPool) الذي تمنحه قاعدة `allow.guest()` أعلاه.
+    // (identityPool) بصلاحية `read` وحدها: يبحث عن تقريره ولا يكتب شيئًا.
     //
-    // ⚠️ وضع مفتوح: أي زائر يقرأ ويكتب بيانات المرضى والنتائج. مناسب
-    // للعرض التجريبي فقط — لبيانات مرضى حقيقية احذف كل `allow.guest()`.
+    // ⚠️ حدّ هذا النموذج: صلاحية القراءة على مستوى الجدول لا الصفّ، فمن
+    // يستدعي الـ API مباشرةً يمكنه قراءة طلبات غيره. الواجهة تطلب رقم
+    // الطلب + رقم الملف معًا، لكن الحماية الحقيقية تحتاج مُحلِّلًا
+    // مخصّصًا (Lambda) يتحقّق من التطابق قبل الإرجاع.
     defaultAuthorizationMode: "userPool",
   },
 });
