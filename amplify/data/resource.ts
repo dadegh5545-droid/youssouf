@@ -161,7 +161,11 @@ const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("mrn").queryField("listPatientsByMrn")])
     .authorization((allow) => [
-      allow.groups(["admin", "reception"]),
+      /* لا `delete`. مريض يُمحى تبقى طلباته ونتائجه ودفعاته في جداولها
+         مشيرةً إلى `patientId` لا وجود له: التقرير المطبوع بيد المريض لا
+         يقابله سجل، وتقرير التحصيل يعدّ مالًا لا صاحب له. ولا سطر في
+         التطبيق يحذف مريضًا أصلًا — المكرَّر يُدمج أو يُهمَل. */
+      allow.groups(["admin", "reception"]).to(["create", "read", "update"]),
       allow.groups(["quality", "tech", "doctor"]).to(["read"]),
     ]),
 
@@ -215,7 +219,13 @@ const schema = a.schema({
       index("day").queryField("listOrdersByDay"),
     ])
     .authorization((allow) => [
-      allow.groups(["admin", "reception"]),
+      /* لا `delete` — ولو للمدير. حذف طلبٍ يترك سطور `OrderItem` ودفعاته
+         وسطور تدقيقه معلّقةً على `orderId` لا وجود له: لا أحد يملك حذفها
+         (عمدًا)، فتبقى نتائج مريض ومالٌ مقبوض في الجداول بلا طلب يجمعها،
+         ولا تظهر في أي شاشة كي تُصحَّح. وقد وقع هذا فعلًا: طلبُ ٢٨ يوليو
+         حُذف من خارج الواجهة وبقيت ستة سطور نتائج يتيمة. الطلب الخطأ
+         يُلغى (`cancelledAt` + `cancelReason`) ويبقى ظاهرًا. */
+      allow.groups(["admin", "reception"]).to(["create", "read", "update"]),
       /* `quality` يعتمد النتائج ويصحّح التقارير المعتمدة، فيحتاج `update`.
          `tech` كان يملكها أيضًا وهو لا يحتاجها: عمله على `OrderItem`،
          وحالة الطلب تنتقل إلى `IN_PROGRESS`/`PENDING_REVIEW` بحفظ

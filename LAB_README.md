@@ -9,9 +9,22 @@
 
 **الموقع المنشور:** <https://main.d1mvwoi85qfdt.amplifyapp.com>
 (Amplify Hosting · منطقة `us-east-2` · نشر يدوي من مجلد `out/`؛ الباكند في
-`us-east-1`). لتحديثه: `npm run build` ثم ارفع محتوى `out/` عبر
-`aws amplify create-deployment` — أو اربط المستودع بالفرع `main` من لوحة
-Amplify ليبني تلقائيًا عند كل دفع.
+`us-east-1`). لتحديثه أمرٌ واحد:
+
+```powershell
+.\publish-site.ps1     # تحقّق كامل ← بناء ← رفع ← تحقّق من المسارات الحيّة
+```
+
+> **لا تضغط `out/` بـ `Compress-Archive`.** في Windows PowerShell 5.1 يكتب
+> أسماء مدخلات الحزمة بشرطة مقلوبة (`catalog\index.html`) بينما معيار ZIP
+> يوجب `/`. فكّ Amplify يُنتج ملفًا واحدًا بهذا الاسم في الجذر بلا أي مجلد
+> فرعي، فترجع كل صفحة وكل ملف JS بـ 404 ويظهر الموقع صفحة بيضاء —
+> وصفحة الجذر تبقى تُخدَم فيبدو النشر ناجحًا. [publish-site.ps1](publish-site.ps1)
+> يبني الحزمة بأسماء مائلة، يتحقّق منها قبل الرفع، ثم يتحقّق من ثمانية
+> مسارات حيّة بعد النشر.
+
+بدلًا من ذلك يمكن ربط المستودع بالفرع `main` من لوحة Amplify ليبني تلقائيًا
+عند كل دفع ([amplify.yml](amplify.yml) جاهز لذلك).
 
 ## التشغيل
 
@@ -27,9 +40,20 @@ npm run dev             # http://localhost:3000
 
 ## بيئة التقييم مقابل بيئة الإنتاج
 
-`ampx sandbox` بيئة **مؤقتة** مرتبطة بجهازك ومستخدمك: لا نسخ احتياطي عليها،
-و`npx ampx sandbox delete` يمحو جداول DynamoDB بما فيها من نتائج مرضى بلا
-استرجاع. استخدمها للتقييم والتدريب فقط.
+`ampx sandbox` بيئة **مؤقتة** مرتبطة بجهازك ومستخدمك: و`npx ampx sandbox delete`
+يمحو جداول DynamoDB بما فيها من نتائج مرضى بلا استرجاع. استخدمها للتقييم
+والتدريب فقط.
+
+**الاسترجاع الزمني (PITR) مُفعَّل الآن على جداول الـ sandbox الثمانية** (٢٩ يوليو
+٢٠٢٦) — يحفظ لقطة مستمرة ٣٥ يومًا فيصير حذف سطرٍ بالخطأ قابلًا للاسترجاع. لكنه
+لا يحمي من `sandbox delete` (يمحو الجدول نفسه)، ولا يسري على جدولٍ يُعاد إنشاؤه
+بعد تعديل بنيوي في المخطط. أعد فحصه بعد أي `ampx sandbox` كبير:
+
+```powershell
+aws dynamodb describe-continuous-backups --region us-east-1 `
+  --table-name <اسم الجدول> `
+  --query "ContinuousBackupsDescription.PointInTimeRecoveryDescription.PointInTimeRecoveryStatus"
+```
 
 للإنتاج:
 
