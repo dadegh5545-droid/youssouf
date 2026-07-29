@@ -696,3 +696,88 @@ tr.critical-row {
   --amplify-components-tabs-item-active-border-color: var(--brand);
   padding: 48px 16px;
 }
+
+/* ── ملصقات الأنابيب ──────────────────────────────────────────
+   مقاس الملصق ٥٠×٢٥ ملم، وهو المقاس الشائع في لفّات طابعات الملصقات
+   الحرارية. الأبعاد بالمليمتر لا بالبكسل: الملصق يُطبع ولا يُعرض، وبكسل
+   الشاشة لا علاقة له بمقاس الورق.                                 */
+
+.labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.label-card {
+  width: 50mm;
+  min-height: 25mm;
+  padding: 2mm;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: #000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1mm;
+  page-break-inside: avoid;
+  break-inside: avoid;
+}
+
+.label-head {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 0.72rem;
+  line-height: 1.2;
+}
+
+.label-tube {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* أسماء الفحوصات سطران على الأكثر: الملصق أضيق من أن يستوعب أكثر،
+   وتجاوزها يدفع الباركود خارج الملصق فلا يُمسح. */
+.label-tests {
+  font-size: 0.62rem;
+  text-align: center;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.label-foot {
+  font-size: 0.58rem;
+}
+
+@media print {
+  .labels {
+    gap: 0;
+  }
+  .label-card {
+    border: none;
+    margin: 0;
+  }
+}
+
+/* ── سجل التدقيق: مقارنة قبل/بعد ─────────────────────────── */
+
+.diff-box {
+  background: var(--surface-2, #f8fafc);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  margin: 4px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  direction: ltr;
+  text-align: left;
+}

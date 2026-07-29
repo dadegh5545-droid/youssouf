@@ -1,0 +1,91 @@
+# فحص تلقائي عند كل دفع أو طلب دمج.
+#
+# لا يلمس AWS ولا ينشر شيئًا: يتحقق من الأنواع، ويشغّل اختبارات منطق
+# المديات المرجعية والأعلام وترميز الباركود (٤٦ اختبارًا)، ويبني التصدير
+# الثابت. الغرض أن يُكشف كسر منطق المديات قبل الدمج لا بعد وصوله إلى
+# تقرير مريض.
+name: فحص
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: تثبيت الحزم
+        run: npm ci
+
+      # `lib/amplify.ts` يستورد amplify_outputs.json، والملف مستبعَد في
+      # .gitignore لأنه ناتج بيئة (sandbox لكل مطوّر، وقيم أخرى للإنتاج).
+      # فلا وجود له في نسخة CI، ولا يُنشئه إلا `ampx` ببيانات اعتماد AWS.
+      # وهذا الفحص لا يلمس AWS عمدًا، فيُكتب ملف صوري بالبنية نفسها: يكفي
+      # لأن يمرّ الاستيراد والبناء، ولا يُشغَّل شيء يتصل بالخادم — الصفحات
+      # كلها عميلة ولا تستعلم وقت البناء.
+      - name: ملف مخرجات صوري للبناء
+        if: hashFiles('amplify_outputs.json') == ''
+        run: |
+          cat > amplify_outputs.json <<'JSON'
+          {
+            "auth": {
+              "user_pool_id": "us-east-1_ciplaceholder",
+              "aws_region": "us-east-1",
+              "user_pool_client_id": "placeholderclientid",
+              "identity_pool_id": "us-east-1:00000000-0000-0000-0000-000000000000",
+              "mfa_methods": [],
+              "standard_required_attributes": ["email"],
+              "username_attributes": ["email"],
+              "user_verification_types": ["email"],
+              "groups": [],
+              "mfa_configuration": "NONE",
+              "password_policy": {
+                "min_length": 8,
+                "require_lowercase": true,
+                "require_numbers": true,
+                "require_symbols": true,
+                "require_uppercase": true
+              },
+              "unauthenticated_identities_enabled": true
+            },
+            "data": {
+              "url": "https://placeholder.appsync-api.us-east-1.amazonaws.com/graphql",
+              "aws_region": "us-east-1",
+              "default_authorization_type": "AMAZON_COGNITO_USER_POOLS",
+              "authorization_types": ["AWS_IAM"],
+              "model_introspection": {
+                "version": 1,
+                "models": {},
+                "enums": {},
+                "nonModels": {},
+                "queries": {},
+                "mutations": {}
+              }
+            },
+            "version": "1.4"
+          }
+          JSON
+
+      - name: فحص الأنواع
+        run: npx tsc --noEmit
+
+      - name: اختبارات منطق المختبر
+        run: npm test
+
+      # البناء يكشف أخطاء الاستيراد وأخطاء التصدير الثابت التي لا يراها tsc.
+      - name: بناء التصدير الثابت
+        run: npm run build
+
+      - name: التحقق من أن البناء أنتج out/
+        run: |
+          test -f out/index.html || { echo "::error::البناء لم ينتج out/index.html"; exit 1; }
+          echo "عدد الملفات المنشورة: $(find out -type f | wc -l)"

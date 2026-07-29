@@ -18,6 +18,7 @@ import {
   verificationCode,
 } from "./lab";
 import { SEED_TESTS } from "./seedTests";
+import { CODE39, encodeCode39 } from "./barcode";
 
 let failed = 0;
 let passed = 0;
@@ -190,6 +191,65 @@ check("التاريخ بأرقام لاتينية", /\d/.test(when) && !arabicIn
 check("التاريخ ميلادي (سنة ٢٠٢٦)", when.includes("2026"), true);
 check("تاريخ فارغ", fmtDateTime(null), "—");
 console.log(`      ${money}  |  ${when}`);
+
+/* ── ٧. باركود الأنبوب ──────────────────────────────────────────
+   الخطر هنا ليس عطلًا: باركود مطبوع بجدول فيه خطأ مطبعي واحد يُمسح
+   بنجاح ويعطي رقمًا آخر — فتُنسب العيّنة إلى مريض غير صاحبها. لذلك
+   نتحقّق من قواعد Code 39 البنيوية على الجدول كله، وهي كاشفة لأي حرف
+   كُتب خطأً حتى لو بدا الباركود سليمًا للعين.                     */
+group("باركود الأنبوب (Code 39)");
+
+const entries = Object.entries(CODE39);
+const isSpecial = (ch: string) => ["$", "/", "+", "%"].includes(ch);
+
+check("الجدول ٤٤ حرفًا (٤٣ + حرف الحدّ)", entries.length, 44);
+check(
+  "كل نمط تسعة عناصر",
+  entries.every(([, p]) => p.length === 9),
+  true
+);
+check(
+  "كل حرف ثلاثة عناصر عريضة",
+  entries.every(([, p]) => p.split("").filter((c) => c === "w").length === 3),
+  true
+);
+check(
+  "الأحرف العادية: خطّان عريضان وفراغ عريض",
+  entries
+    .filter(([ch]) => !isSpecial(ch))
+    .every(([, p]) => {
+      const wideBars = p.split("").filter((c, i) => c === "w" && i % 2 === 0).length;
+      return wideBars === 2;
+    }),
+  true
+);
+check(
+  "الأحرف الخاصة ($ / + %): ثلاثة فراغات عريضة بلا خط عريض",
+  entries
+    .filter(([ch]) => isSpecial(ch))
+    .every(([, p]) => p.split("").filter((c, i) => c === "w" && i % 2 === 0).length === 0),
+  true
+);
+check(
+  "لا نمطين متطابقين لحرفين",
+  new Set(entries.map(([, p]) => p)).size,
+  entries.length
+);
+check(
+  "كل حرف يبدأ وينتهي بخط",
+  entries.every(([, p]) => p.length === 9),
+  true
+);
+
+const bc = encodeCode39("LAB-260729-812326");
+// ١٧ حرف بيانات + حرفا حدّ = ١٩ حرفًا × ٥ خطوط
+check("عدد الخطوط = ٥ لكل حرف", bc.bars.length, 19 * 5);
+check("النص المرمَّز كما هو", bc.text, "LAB-260729-812326");
+check("لا خطوط متداخلة", bc.bars.every((b, i) => i === 0 || b.x >= bc.bars[i - 1].x + bc.bars[i - 1].width), true);
+check("حروف صغيرة تُرفع", encodeCode39("lab-1").text, "LAB-1");
+check("حرف غير مقبول يصير شرطة لا يُحذف", encodeCode39("A#B").text, "A-B");
+check("النجمة في البيانات لا تكسر الحدّ", encodeCode39("A*B").text, "A-B");
+console.log(`      عرض باركود "LAB-260729-812326" = ${bc.width} وحدة`);
 
 /* ── النتيجة ───────────────────────────────────────────────── */
 console.log(

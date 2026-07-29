@@ -3,16 +3,21 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { signOut } from "aws-amplify/auth";
-import { ROLE_LABEL, useSession } from "@/lib/amplify";
+import { ROLE_LABEL, useSession, type Action } from "@/lib/amplify";
 import { useLabConfig } from "@/lib/config";
 
-const TABS = [
+/* `can` يخفي التبويب عمّن لا يملك الإجراء. تبويب يقود إلى صفحة ترفضه
+   يعلّم الموظف أن يتجاهل رسائل المنع بدل أن يقرأها. */
+const TABS: { href: string; label: string; can?: Action }[] = [
   { href: "/", label: "لوحة اليوم" },
   { href: "/orders", label: "قائمة العمل" },
   { href: "/patients", label: "المرضى" },
-  { href: "/orders/new", label: "طلب جديد" },
+  { href: "/orders/new", label: "طلب جديد", can: "createOrder" },
   { href: "/catalog", label: "كتالوج الفحوصات" },
-  { href: "/settings", label: "الإعدادات" },
+  { href: "/reports", label: "التقارير", can: "viewReports" },
+  { href: "/audit", label: "سجل التدقيق", can: "viewAudit" },
+  { href: "/staff", label: "الموظفون", can: "manageStaff" },
+  { href: "/settings", label: "الإعدادات", can: "manageCatalog" },
 ];
 
 export default function Nav() {
@@ -39,7 +44,7 @@ export default function Nav() {
         </Link>
 
         {/* الزائر لا يرى تبويبات الموظفين — صفحته الوحيدة هي تقريره. */}
-        {(session.guest ? [] : TABS).map((t) => (
+        {(session.guest ? [] : TABS.filter((t) => !t.can || session.can(t.can))).map((t) => (
           <Link
             key={t.href}
             href={t.href}

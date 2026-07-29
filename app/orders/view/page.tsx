@@ -4,6 +4,7 @@ import { Fragment, Suspense, useCallback, useEffect, useMemo, useState } from "r
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { audit, client, listAll, useSession } from "@/lib/amplify";
+import { actionLabel } from "@/lib/audit";
 import type { Schema } from "@/amplify/data/resource";
 import {
   DEPARTMENT_LABEL,
@@ -23,6 +24,7 @@ import {
 type Order = Schema["Order"]["type"];
 type Patient = Schema["Patient"]["type"];
 type Item = Schema["OrderItem"]["type"];
+type Log = Schema["AuditLog"]["type"];
 
 type Draft = { value: string; comment: string };
 
@@ -49,6 +51,11 @@ function OrderPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+
+  /* سجل الطلب: استعلام لكل سطر مسجَّل (الطلب نفسه + كل فحص فيه)، فلا
+     يُحمَّل إلا بطلب صريح — فتح الطلب لإدخال نتيجة لا يستدعي تاريخه. */
+  const [history, setHistory] = useState<Log[] | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
 
   const load = useCallback(async () => {
     if (!orderId) {
@@ -383,6 +390,108 @@ function OrderPage() {
     }
   }
 
+  /**
+   * تسجيل دفعة على الطلب.
+   *
+   * `paidAmount` كان يُكتب مرة واحدة عند إنشاء الطلب، فمريض دفع نصف
+   * المبلغ وعاد ليكمل لم يكن لدفعته مكان في النظام — تُكتب في دفتر جانبي
+   * أو تضيع.
+   *
+   * ملاحظة: هذه قراءة ثم كتابة بلا قفل. لو سجّل موظفان دفعتين على الطلب
+   * نفسه في اللحظة نفسها ضاعت إحداهما. المخرج الكامل جدول `Payment`
+   * مستقل تُجمع سطوره، وهو ما يلزم عند تعدّد نقاط التحصيل.
+   */
+  async function recordPayment() {
+    if (!order) return;
+    const net = Math.max(0, (order.totalPrice ?? 0) - (order.discount ?? 0));
+    const paid = order.paidAmount ?? 0;
+    const due = Math.max(0, net - paid);
+    if (due <= 0) {
+      setMsg("لا متبقّي على هذا الطلب.");
+      return;
+    }
+    const raw = window.prompt(
+      `الصافي ${fmtMoney(net)} · المدفوع ${fmtMoney(paid)} · المتبقّي ${fmtMoney(due)}.\n\nاكتب المبلغ المدفوع الآن:`,
+      String(due)
+    );
+    if (raw === null) return;
+
+    const amount = Number(raw.replace(/[^\d.-]/g, ""));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setMsg("مبلغ غير صالح.");
+      return;
+    }
+    // الزيادة على المتبقّي تُرفض: فائض في حساب المريض لا مكان له في هذا
+    // النموذج، وتسجيله يجعل تقرير الإيراد يعدّ مالًا لم يُقبض.
+    if (amount > due + 0.001) {
+      setMsg(`المبلغ أكبر من المتبقّي (${fmtMoney(due)}). سجّل ${fmtMoney(due)} أو أقل.`);
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const next = Math.round((paid + amount) * 100) / 100;
+      const { errors } = await client.models.Order.update({
+        id: order.id,
+        paidAmount: next,
+      });
+      if (errors?.length) throw new Error(errors[0].message);
+      await audit({
+        entity: "Order",
+        entityId: order.id,
+        action: "PAYMENT_RECORDED",
+        actor: session.actor,
+        summary: `دفعة ${fmtMoney(amount)} على الطلب ${order.orderNo} — المتبقّي ${fmtMoney(
+          Math.max(0, net - next)
+        )}`,
+        before: { paidAmount: paid },
+        after: { paidAmount: next },
+      });
+      setMsg(`سُجّلت دفعة ${fmtMoney(amount)}.`);
+      await load();
+    } catch (e) {
+      setMsg(`تعذّر تسجيل الدفعة: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * سجل هذا الطلب: من فعل ماذا ومتى، مرتّبًا من الأحدث.
+   *
+   * الأحداث موزّعة على معرّفين: ما يخصّ الطلب (إنشاء · سحب · اعتماد ·
+   * دفعة · إلغاء) تحت معرّف الطلب، وما يخصّ نتيجةً بعينها تحت معرّف
+   * الفحص. فتُقرأ كلها عبر فهرس `entityId` — استعلام لكل معرّف، لا مسح
+   * للجدول ولا فلترة سجل اليوم كله في المتصفّح.
+   */
+  async function loadHistory() {
+    if (!order) return;
+    setHistoryBusy(true);
+    try {
+      const ids = [order.id, ...items.map((i) => i.id)];
+      const pages = await Promise.all(
+        ids.map((entityId) =>
+          listAll<Log>((nextToken) =>
+            client.models.AuditLog.listAuditByEntity(
+              { entityId },
+              { limit: 100, sortDirection: "DESC", nextToken }
+            )
+          )
+        )
+      );
+      const rows = pages
+        .flat()
+        .sort((a, b) =>
+          String(b.at ?? b.createdAt).localeCompare(String(a.at ?? a.createdAt))
+        );
+      setHistory(rows);
+    } catch (e) {
+      setMsg(`تعذّر جلب سجل الطلب: ${(e as Error).message}`);
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+
   async function cancelOrder() {
     if (!order) return;
     const reason = window.prompt(
@@ -507,6 +616,13 @@ function OrderPage() {
               التقرير 🖨️
             </Link>
           )}
+          {/* الإيصال يبقى متاحًا بعد الاعتماد أيضًا: المريض يفقد إيصاله
+              فيعود لطلب نسخة، ورقم الطلب لا يُستخرج من غيره. */}
+          {!cancelled && (
+            <Link href={`/orders/receipt?id=${order.id}`} className="btn">
+              الإيصال والملصقات 🏷️
+            </Link>
+          )}
           {order.status === "APPROVED" && canManageOrder && (
             <button className="btn" onClick={markDelivered} disabled={busy}>
               تسجيل التسليم
@@ -607,15 +723,32 @@ function OrderPage() {
             {order.collectedAt ? `سُحبت ${fmtDateTime(order.collectedAt)}` : "لم تُسحب بعد"}
           </div>
         </div>
-        <div className="stat">
-          <div className="label">الفاتورة</div>
-          <div className="value" style={{ fontSize: "1rem" }}>
-            {fmtMoney((order.totalPrice ?? 0) - (order.discount ?? 0))}
-          </div>
-          <div className="sub">
-            مدفوع {fmtMoney(order.paidAmount)}
-          </div>
-        </div>
+        {(() => {
+          const net = Math.max(0, (order.totalPrice ?? 0) - (order.discount ?? 0));
+          const due = Math.max(0, net - (order.paidAmount ?? 0));
+          return (
+            <div className={`stat${due > 0 ? " warn-accent" : ""}`}>
+              <div className="label">الفاتورة</div>
+              <div className="value" style={{ fontSize: "1rem" }}>
+                {fmtMoney(net)}
+              </div>
+              <div className="sub">
+                مدفوع {fmtMoney(order.paidAmount)}
+                {due > 0 && ` · متبقٍّ ${fmtMoney(due)}`}
+              </div>
+              {due > 0 && !cancelled && session.can("viewFinance") && (
+                <button
+                  className="btn sm"
+                  style={{ marginTop: 8 }}
+                  onClick={recordPayment}
+                  disabled={busy}
+                >
+                  تسجيل دفعة
+                </button>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {order.clinicalNotes && (
@@ -761,6 +894,53 @@ function OrderPage() {
         <p className="muted small" style={{ marginTop: 12 }}>
           صلاحيتك الحالية لا تسمح بإدخال النتائج.
         </p>
+      )}
+
+      {/* سجل الطلب لمن يراجع لا لمن يُراجَع عمله — كصفحة سجل التدقيق. */}
+      {session.can("viewAudit") && (
+        <section className="card no-print" style={{ marginTop: 20 }}>
+          <div className="card-head">
+            <h2 style={{ margin: 0, fontSize: "1rem" }}>سجل هذا الطلب</h2>
+            <button
+              className="btn sm"
+              onClick={() => (history ? setHistory(null) : void loadHistory())}
+              disabled={historyBusy}
+            >
+              {historyBusy ? "جارٍ…" : history ? "إخفاء" : "عرض السجل"}
+            </button>
+          </div>
+
+          {history && history.length === 0 && (
+            <p className="muted small">لا أحداث مسجَّلة على هذا الطلب.</p>
+          )}
+
+          {history && history.length > 0 && (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>الوقت</th>
+                    <th>الحدث</th>
+                    <th>الفاعل</th>
+                    <th>التفصيل</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map((l) => (
+                    <tr key={l.id}>
+                      <td className="small nowrap">
+                        {fmtDateTime(l.at ?? l.createdAt)}
+                      </td>
+                      <td className="small nowrap">{actionLabel(l.action)}</td>
+                      <td className="small nowrap">{l.actor}</td>
+                      <td className="small">{l.summary || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
       )}
     </>
   );

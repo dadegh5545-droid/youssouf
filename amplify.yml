@@ -1,3 +1,9 @@
+# بناء Amplify Hosting: الباكند ثم الفرونت.
+#
+# ⚠️ المجلد المنشور هو `out/` وليس `.next/`: التطبيق تصدير ثابت
+# (`output: "export"` في next.config.js)، فـ `next build` يكتب صفحات HTML
+# جاهزة في `out/` ولا يُنتج خادمًا في `.next/`. نشر `.next` يرفع ملفات
+# بناء داخلية ويعطي موقعًا فارغًا — والبناء ينجح، فلا شيء ينبّهك.
 version: 1
 backend:
   phases:
@@ -9,9 +15,11 @@ frontend:
   phases:
     build:
       commands:
+        - npm ci --cache .npm --prefer-offline
+        - npm test
         - npm run build
   artifacts:
-    baseDirectory: .next
+    baseDirectory: out
     files:
       - '**/*'
   cache:

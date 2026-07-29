@@ -112,7 +112,10 @@ export type Action =
   | "approveResults"
   | "amendApproved"
   | "manageCatalog"
-  | "viewFinance";
+  | "viewFinance"
+  | "manageStaff"
+  | "viewAudit"
+  | "viewReports";
 
 const MATRIX: Record<Action, Role[]> = {
   managePatients: ["admin", "reception"],
@@ -123,6 +126,12 @@ const MATRIX: Record<Action, Role[]> = {
   amendApproved: ["admin", "quality"],
   manageCatalog: ["admin"],
   viewFinance: ["admin", "reception"],
+  // منح الصلاحيات صلاحية إدارية بامتياز: من يملكها يملك كل شيء بالتبعية.
+  manageStaff: ["admin"],
+  // سجل التدقيق أداة مراجعة: المدير ومسؤول الجودة، لا من يُراجَع عمله.
+  viewAudit: ["admin", "quality"],
+  // التقارير تكشف الإيراد، فهي لمن يراه أصلًا في الفواتير.
+  viewReports: ["admin", "quality"],
 };
 
 /**
@@ -292,6 +301,7 @@ export async function audit(entry: {
   after?: unknown;
 }) {
   try {
+    const now = new Date();
     await client.models.AuditLog.create({
       entity: entry.entity,
       entityId: entry.entityId,
@@ -300,8 +310,19 @@ export async function audit(entry: {
       summary: entry.summary,
       before: entry.before ? JSON.stringify(entry.before) : undefined,
       after: entry.after ? JSON.stringify(entry.after) : undefined,
+      /* مفتاحا الفهرس. `day` بالتوقيت المحلي لا UTC: مدير المختبر يسأل
+         عن «ما جرى اليوم» بيومه هو، وسطر أُدخل الساعة الثانية صباحًا
+         بالرياض يظهر في يوم أمس لو حُسب بـ UTC. */
+      day: localDay(now),
+      at: now.toISOString(),
     });
   } catch (e) {
     console.warn("audit log failed", e);
   }
+}
+
+/** تاريخ محلي بصيغة YYYY-MM-DD — مفتاح تقسيم سجل التدقيق. */
+export function localDay(d: Date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }

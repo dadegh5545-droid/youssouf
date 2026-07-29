@@ -1,5 +1,6 @@
 import { type ClientSchema, a, defineData } from "@aws-amplify/backend";
 import { getMyReport } from "../functions/get-my-report/resource";
+import { manageStaff } from "../functions/manage-staff/resource";
 
 /**
  * نموذج بيانات نظام إدارة المختبر الطبي (LIS).
@@ -157,9 +158,17 @@ const schema = a.schema({
       totalPrice: a.float().default(0),
       paidAmount: a.float().default(0),
       discount: a.float().default(0),
+
+      /* يوم إنشاء الطلب (YYYY-MM-DD بالتوقيت المحلي) — مفتاح تقسيم
+         لتقارير الفترة. بدونه يقرأ تقرير شهر واحد كل طلبات المختبر منذ
+         افتتاحه ثم يرمي ما لا يخصّه، فتزداد كلفته وبطؤه كل شهر بلا
+         سبب. والتوقيت محلي لا UTC: تقرير «أمس» يجب أن يطابق يوم
+         المحاسب لا يوم غرينتش.                                     */
+      day: a.string(),
     })
     .secondaryIndexes((index) => [
       index("orderNo").queryField("listOrdersByOrderNo"),
+      index("day").queryField("listOrdersByDay"),
     ])
     .authorization((allow) => [
       allow.groups(["admin", "reception"]),
@@ -179,6 +188,11 @@ const schema = a.schema({
       department: a.ref("Department").required(),
       resultType: a.ref("ResultType").required(),
       unit: a.string(),
+      // العيّنة والأنبوب مجمّدان مع الفحص لا مقروءان من الكتالوج وقت
+      // الطباعة: تغيير أنبوب فحص في الكتالوج بعد سحب العيّنة يجعل ملصق
+      // الأنبوب المطبوع يخالف الأنبوب الذي في يد الفنّي.
+      sampleType: a.string(),
+      tubeType: a.string(),
       options: a.string().array(),
       price: a.float().default(0),
       refLow: a.float(),
@@ -225,14 +239,26 @@ const schema = a.schema({
      يستطيع المدير محوه لا يصلح دليلًا عند مراجعة أو نزاع.           */
   AuditLog: a
     .model({
-      entity: a.string().required(), // Order | OrderItem | Patient
+      entity: a.string().required(), // Order | OrderItem | Patient | Staff
       entityId: a.string().required(),
       action: a.string().required(), // RESULT_ENTERED | APPROVED | AMENDED …
       actor: a.string().required(),
       summary: a.string(),
       before: a.json(),
       after: a.json(),
+
+      /* `day` (YYYY-MM-DD) مفتاح تقسيم للعرض الزمني، و`at` مفتاح فرز.
+         سجل التدقيق يكبر بأسرع من كل الجداول — سطر لكل نتيجة تُدخل —
+         فقراءته بمسح الجدول تبطؤ شهرًا بعد شهر حتى تعجز الصفحة. واليوم
+         مفتاحًا يوزّع الكتابة على أقسام بعدد الأيام بدل قسم واحد ساخن. */
+      day: a.string(),
+      at: a.datetime(),
     })
+    .secondaryIndexes((index) => [
+      index("day").sortKeys(["at"]).queryField("listAuditByDay"),
+      // سجل طلب أو مريض بعينه: «من غيّر هذه النتيجة ومتى».
+      index("entityId").sortKeys(["at"]).queryField("listAuditByEntity"),
+    ])
     .authorization((allow) => [
       // الزائر لا يكتب ولا يقرأ سجل التدقيق — لا شأن له به.
       allow.authenticated().to(["create", "read"]),
@@ -253,6 +279,27 @@ const schema = a.schema({
     .returns(a.json())
     .handler(a.handler.function(getMyReport))
     .authorization((allow) => [allow.guest(), allow.authenticated()]),
+
+  /* ── إدارة الموظفين وأدوارهم ─────────────────────────────────
+     الأدوار مجموعات في Cognito لا صفوف في جدول، فلا تُدار من الواجهة
+     إلا عبر دالة تملك صلاحية استدعاء Cognito. الصلاحية محصورة بـ`admin`
+     هنا، فيرفض AppSync الطلب قبل أن يبلغ الدالة.                */
+  listStaff: a
+    .query()
+    .returns(a.json())
+    .handler(a.handler.function(manageStaff))
+    .authorization((allow) => [allow.groups(["admin"])]),
+
+  manageStaff: a
+    .mutation()
+    .arguments({
+      action: a.string().required(), // ADD_GROUP | REMOVE_GROUP | ENABLE | DISABLE | RESET_PASSWORD
+      username: a.string().required(),
+      group: a.string(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(manageStaff))
+    .authorization((allow) => [allow.groups(["admin"])]),
 })
   // الدالة تقرأ الجداول بالنيابة عن الزائر بعد التحقّق، فتحتاج صلاحية
   // استعلام على المخطط — وهي وحدها، لا الزائر.

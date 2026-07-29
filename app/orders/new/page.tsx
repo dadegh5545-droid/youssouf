@@ -2,7 +2,14 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { audit, client, listAll, reserveOrderNo, useSession } from "@/lib/amplify";
+import {
+  audit,
+  client,
+  listAll,
+  localDay,
+  reserveOrderNo,
+  useSession,
+} from "@/lib/amplify";
 import type { Schema } from "@/amplify/data/resource";
 import {
   DEPARTMENT_LABEL,
@@ -143,6 +150,7 @@ function NewOrder() {
         totalPrice: total,
         discount,
         paidAmount: paid,
+        day: localDay(),
       });
       if (errors?.length) throw new Error(errors[0].message);
       if (!order) throw new Error("لم يُنشأ الطلب");
@@ -162,6 +170,8 @@ function NewOrder() {
             department: t.department,
             resultType: t.resultType,
             unit: t.unit,
+            sampleType: t.sampleType,
+            tubeType: t.tubeType,
             options: t.options,
             price: t.price ?? 0,
             refLow: r?.low ?? undefined,
