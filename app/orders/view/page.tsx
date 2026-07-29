@@ -11,7 +11,16 @@ import {
 } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { audit, client, listAll, useSession } from "@/lib/amplify";
+import {
+  addPayment,
+  audit,
+  client,
+  listAll,
+  syncPaidAmount,
+  useSession,
+  voidPayment,
+  type Payment,
+} from "@/lib/amplify";
 import { actionLabel } from "@/lib/audit";
 import { scanMatchesOrder } from "@/lib/scanner";
 import ScanBox from "@/app/components/ScanBox";
@@ -19,6 +28,7 @@ import type { Schema } from "@/amplify/data/resource";
 import {
   DEPARTMENT_LABEL,
   FLAG_META,
+  PAYMENT_METHOD_LABEL,
   PRIORITY_LABEL,
   SEX_LABEL,
   STATUS_META,
@@ -28,6 +38,9 @@ import {
   fmtDateTime,
   fmtMoney,
   isCritical,
+  orderDue,
+  orderNet,
+  sumPayments,
   type Flag,
 } from "@/lib/lab";
 
@@ -53,10 +66,15 @@ export default function Page() {
 function OrderPage() {
   const params = useSearchParams();
   const orderId = params.get("id") ?? "";
+  /* إنشاء الطلب نجح لكن تسجيل دفعته الأولى فشل: الطلب قائم والمال في
+     الدرج بلا سطر. اللافتة تُظهر الخلل هنا حيث زرّ التسجيل، بدل أن
+     يُلغى عمل صحيح أو يمرّ القبض بصمت. */
+  const payFail = params.get("payfail") ?? "";
   const session = useSession();
   const [order, setOrder] = useState<Order | null>(null);
   const [patient, setPatient] = useState<Patient | null>(null);
   const [items, setItems] = useState<Item[]>([]);
+  const [payments, setPayments] = useState<Payment[]>([]);
   const [draft, setDraft] = useState<Record<string, Draft>>({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -132,8 +150,39 @@ function OrderPage() {
      بلا هذا التصفير تبقى لافتة «الأنبوب مطابق» معروضة فوق طلب لم يُمسح. */
   useEffect(() => {
     setTube(null);
+    setPayments([]);
     loggedScans.current = new Set();
   }, [orderId]);
+
+  /**
+   * سجل الدفعات — مصدر الحقيقة في المال، و`paidAmount` نسخة مخبَّأة منه.
+   *
+   * يُقرأ في تأثير مستقلّ لا داخل `load`: صلاحية رؤية المال تصل بعد
+   * الجلسة، وربطها بـ`load` كان يعيد تحميل الطلب وفحوصاته كلها مرة
+   * ثانية بلا سبب حين تصل.
+   *
+   * `syncPaidAmount` تصلح النسخة إن خالفت السطور — وهو ما يشفي انقطاعًا
+   * وقع بين كتابة سطر الدفعة وتحديث النسخة.
+   */
+  const canSeeMoney = session.can("viewFinance");
+
+  /* النسخة المحفوظة تُمرَّر كي تكون الكتابة مشروطة باختلافها عن مجموع
+     السطور — بلا تمريرها يُكتب الطلب في كل فتح لصفحته بلا سبب. لذلك
+     ننتظر تحميل الطلب أولًا (`null` = لم يصل بعد). */
+  const cachedPaid = order?.id === orderId ? order.paidAmount ?? 0 : null;
+
+  const loadPayments = useCallback(async () => {
+    if (!orderId || !canSeeMoney || cachedPaid === null) return;
+    const synced = await syncPaidAmount(orderId, cachedPaid);
+    setPayments(synced.payments);
+    if (synced.repaired) {
+      setOrder((cur) => (cur && cur.id === orderId ? { ...cur, paidAmount: synced.paid } : cur));
+    }
+  }, [orderId, canSeeMoney, cachedPaid]);
+
+  useEffect(() => {
+    loadPayments().catch((e) => console.warn("تعذّر قراءة سجل الدفعات", e));
+  }, [loadPayments]);
 
   /** العَلَم المحسوب لحظيًا من القيمة المكتوبة (قبل الحفظ). */
   const flagOf = useCallback(
@@ -159,6 +208,13 @@ function OrderPage() {
   const filledCount = items.filter((i) => (draft[i.id]?.value ?? "").trim()).length;
   const allFilled = items.length > 0 && filledCount === items.length;
   const criticals = items.filter((i) => isCritical(flagOf(i)));
+
+  /* المال: الصافي من الطلب، والمقبوض من سجل الدفعات لا من النسخة
+     المخبَّأة. من لا يملك رؤية المال لا يقرأ السجل أصلًا، فتبقى له
+     النسخة — وهو لا يرى بطاقة الفاتورة على أي حال. */
+  const net = orderNet(order?.totalPrice, order?.discount);
+  const paid = canSeeMoney ? sumPayments(payments) : order?.paidAmount ?? 0;
+  const due = orderDue(net, paid);
 
   const approved = order?.status === "APPROVED" || order?.status === "DELIVERED";
   const cancelled = order?.status === "CANCELLED";
@@ -419,25 +475,20 @@ function OrderPage() {
   /**
    * تسجيل دفعة على الطلب.
    *
-   * `paidAmount` كان يُكتب مرة واحدة عند إنشاء الطلب، فمريض دفع نصف
-   * المبلغ وعاد ليكمل لم يكن لدفعته مكان في النظام — تُكتب في دفتر جانبي
-   * أو تضيع.
-   *
-   * ملاحظة: هذه قراءة ثم كتابة بلا قفل. لو سجّل موظفان دفعتين على الطلب
-   * نفسه في اللحظة نفسها ضاعت إحداهما. المخرج الكامل جدول `Payment`
-   * مستقل تُجمع سطوره، وهو ما يلزم عند تعدّد نقاط التحصيل.
+   * سطر مستقلّ في `Payment` لا زيادة على `paidAmount`: الزيادة كانت
+   * قراءة ثم كتابة بلا قفل، فدفعتان في اللحظة نفسها تُبقي إحداهما وتمحو
+   * الأخرى — مالٌ قُبض من المريض واختفى. السطور لا تتصادم.
    */
-  async function recordPayment() {
+  async function recordPayment(method: string) {
     if (!order) return;
-    const net = Math.max(0, (order.totalPrice ?? 0) - (order.discount ?? 0));
-    const paid = order.paidAmount ?? 0;
-    const due = Math.max(0, net - paid);
     if (due <= 0) {
       setMsg("لا متبقّي على هذا الطلب.");
       return;
     }
     const raw = window.prompt(
-      `الصافي ${fmtMoney(net)} · المدفوع ${fmtMoney(paid)} · المتبقّي ${fmtMoney(due)}.\n\nاكتب المبلغ المدفوع الآن:`,
+      `الصافي ${fmtMoney(net)} · المدفوع ${fmtMoney(paid)} · المتبقّي ${fmtMoney(due)}.` +
+        `\nطريقة الدفع: ${PAYMENT_METHOD_LABEL[method] ?? method}` +
+        `\n\nاكتب المبلغ المدفوع الآن:`,
       String(due)
     );
     if (raw === null) return;
@@ -448,35 +499,75 @@ function OrderPage() {
       return;
     }
     // الزيادة على المتبقّي تُرفض: فائض في حساب المريض لا مكان له في هذا
-    // النموذج، وتسجيله يجعل تقرير الإيراد يعدّ مالًا لم يُقبض.
-    if (amount > due + 0.001) {
+    // النموذج، وتسجيله يجعل تقرير التحصيل يعدّ مالًا لا يقابله فاتورة.
+    if (amount > due + 0.005) {
       setMsg(`المبلغ أكبر من المتبقّي (${fmtMoney(due)}). سجّل ${fmtMoney(due)} أو أقل.`);
       return;
     }
 
     setBusy(true);
     try {
-      const next = Math.round((paid + amount) * 100) / 100;
-      const { errors } = await client.models.Order.update({
-        id: order.id,
-        paidAmount: next,
+      const res = await addPayment({
+        orderId: order.id,
+        orderNo: order.orderNo,
+        amount,
+        method,
+        actor: session.actor,
       });
-      if (errors?.length) throw new Error(errors[0].message);
+      setPayments(res.payments);
+      setOrder((cur) => (cur ? { ...cur, paidAmount: res.paid } : cur));
       await audit({
         entity: "Order",
         entityId: order.id,
         action: "PAYMENT_RECORDED",
         actor: session.actor,
-        summary: `دفعة ${fmtMoney(amount)} على الطلب ${order.orderNo} — المتبقّي ${fmtMoney(
-          Math.max(0, net - next)
-        )}`,
-        before: { paidAmount: paid },
-        after: { paidAmount: next },
+        summary:
+          `دفعة ${fmtMoney(amount)} (${PAYMENT_METHOD_LABEL[method] ?? method}) ` +
+          `على الطلب ${order.orderNo} — المتبقّي ${fmtMoney(orderDue(net, res.paid))}`,
+        after: { amount, method, paid: res.paid },
       });
       setMsg(`سُجّلت دفعة ${fmtMoney(amount)}.`);
-      await load();
     } catch (e) {
       setMsg(`تعذّر تسجيل الدفعة: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * إبطال دفعة — لا حذف.
+   *
+   * سطر مال يُمحى لا يُراجَع: من أراد إخفاء قبض لا يظهر أثره في نظام
+   * يسمح بالحذف. الإبطال يترك السطر ظاهرًا مشطوبًا بسببه واسم مُبطِله،
+   * وهو لمجموعة `admin` وحدها في قواعد المخطط — من يقبض لا يبطل قبضه.
+   */
+  async function undoPayment(p: Payment) {
+    if (!order) return;
+    const reason = window.prompt(
+      `إبطال دفعة ${fmtMoney(p.amount)} المسجَّلة في ${fmtDateTime(p.at)}.\n` +
+        "اكتب السبب (خطأ إدخال، دفعة مكرّرة، ارتجاع…):"
+    );
+    if (reason === null) return;
+    if (!reason.trim()) {
+      setMsg("الإبطال يتطلّب ذكر السبب.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await voidPayment(p, reason.trim(), session.actor);
+      setPayments(res.payments);
+      setOrder((cur) => (cur ? { ...cur, paidAmount: res.paid } : cur));
+      await audit({
+        entity: "Order",
+        entityId: order.id,
+        action: "PAYMENT_VOIDED",
+        actor: session.actor,
+        summary: `إبطال دفعة ${fmtMoney(p.amount)} على الطلب ${order.orderNo}: ${reason.trim()}`,
+        before: { amount: p.amount, at: p.at, receivedBy: p.receivedBy },
+      });
+      setMsg(`أُبطلت دفعة ${fmtMoney(p.amount)}.`);
+    } catch (e) {
+      setMsg(`تعذّر الإبطال: ${(e as Error).message}`);
     } finally {
       setBusy(false);
     }
@@ -720,6 +811,13 @@ function OrderPage() {
 
       {msg && <div className="alert">{msg}</div>}
 
+      {payFail && (
+        <div className="alert danger">
+          أُنشئ الطلب لكن <strong>لم تُسجَّل دفعته الأولى</strong> ({payFail}). سجّلها
+          الآن من بطاقة الفاتورة أدناه — المبلغ مقبوض من المريض وغير مقيَّد.
+        </div>
+      )}
+
       {cancelled && (
         <div className="alert danger">
           هذا الطلب ملغى — {order.cancelReason || "بلا سبب مسجّل"} · ألغاه{" "}
@@ -805,33 +903,102 @@ function OrderPage() {
             {order.collectedAt ? `سُحبت ${fmtDateTime(order.collectedAt)}` : "لم تُسحب بعد"}
           </div>
         </div>
-        {(() => {
-          const net = Math.max(0, (order.totalPrice ?? 0) - (order.discount ?? 0));
-          const due = Math.max(0, net - (order.paidAmount ?? 0));
-          return (
-            <div className={`stat${due > 0 ? " warn-accent" : ""}`}>
-              <div className="label">الفاتورة</div>
-              <div className="value" style={{ fontSize: "1rem" }}>
-                {fmtMoney(net)}
-              </div>
-              <div className="sub">
-                مدفوع {fmtMoney(order.paidAmount)}
-                {due > 0 && ` · متبقٍّ ${fmtMoney(due)}`}
-              </div>
-              {due > 0 && !cancelled && session.can("viewFinance") && (
+        <div className={`stat${due > 0 ? " warn-accent" : ""}`}>
+          <div className="label">الفاتورة</div>
+          <div className="value" style={{ fontSize: "1rem" }}>
+            {fmtMoney(net)}
+          </div>
+          <div className="sub">
+            مدفوع {fmtMoney(paid)}
+            {due > 0 && ` · متبقٍّ ${fmtMoney(due)}`}
+          </div>
+          {due > 0 && !cancelled && canSeeMoney && (
+            <div className="row" style={{ marginTop: 8 }}>
+              {/* طريقة الدفع زرّ لا قائمة: الاستقبال يقبض ويطبع في ثانية،
+                  وخطوة اختيار إضافية تُترك على الافتراضي دائمًا فتفسد
+                  مطابقة الصندوق بدل أن تفيدها. */}
+              {Object.entries(PAYMENT_METHOD_LABEL).map(([key, label]) => (
                 <button
-                  className="btn sm"
-                  style={{ marginTop: 8 }}
-                  onClick={recordPayment}
+                  key={key}
+                  className={`btn sm${key === "CASH" ? " primary" : ""}`}
+                  onClick={() => recordPayment(key)}
                   disabled={busy}
+                  title={`تسجيل دفعة ${label}`}
                 >
-                  تسجيل دفعة
+                  {label}
                 </button>
-              )}
+              ))}
             </div>
-          );
-        })()}
+          )}
+        </div>
       </div>
+
+      {canSeeMoney && payments.length > 0 && (
+        <div className="card no-print" style={{ marginBottom: 16 }}>
+          <div className="card-head">
+            <h2 style={{ margin: 0, fontSize: "1rem" }}>سجل الدفعات</h2>
+            <span className="muted small">
+              {payments.filter((p) => !p.voidedAt).length} دفعة سارية ·{" "}
+              {fmtMoney(paid)} مقبوض
+            </span>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>الوقت</th>
+                  <th className="num">المبلغ</th>
+                  <th>الطريقة</th>
+                  <th>قبضها</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {payments.map((p) => (
+                  <tr key={p.id} style={p.voidedAt ? { opacity: 0.55 } : undefined}>
+                    <td className="small nowrap">{fmtDateTime(p.at)}</td>
+                    <td className="num nowrap">
+                      <span
+                        style={
+                          p.voidedAt ? { textDecoration: "line-through" } : undefined
+                        }
+                      >
+                        {fmtMoney(p.amount)}
+                      </span>
+                    </td>
+                    <td className="small nowrap">
+                      {PAYMENT_METHOD_LABEL[p.method ?? ""] ?? "—"}
+                    </td>
+                    <td className="small nowrap">{p.receivedBy}</td>
+                    <td className="small">
+                      {p.voidedAt ? (
+                        <span className="badge muted">
+                          مُبطلة — {p.voidReason} · {p.voidedBy}
+                        </span>
+                      ) : (
+                        isAdmin &&
+                        !cancelled && (
+                          <button
+                            className="btn sm ghost"
+                            onClick={() => undoPayment(p)}
+                            disabled={busy}
+                          >
+                            إبطال
+                          </button>
+                        )
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="muted small" style={{ marginBottom: 0 }}>
+            الدفعات لا تُحذف — الخطأ يُبطَل بسبب مكتوب ويبقى السطر ظاهرًا.
+            الإبطال لمدير المختبر وحده: من يقبض لا يبطل قبضه.
+          </p>
+        </div>
+      )}
 
       {order.clinicalNotes && (
         <div className="alert">الشكوى: {order.clinicalNotes}</div>

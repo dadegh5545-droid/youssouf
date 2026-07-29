@@ -3,11 +3,19 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { client, listAll } from "@/lib/amplify";
+import { client, listAll, listPayments, type Payment } from "@/lib/amplify";
 import { useLabConfig } from "@/lib/config";
 import Barcode from "@/app/components/Barcode";
 import type { Schema } from "@/amplify/data/resource";
-import { SEX_LABEL, ageLabel, fmtDateTime, fmtMoney } from "@/lib/lab";
+import {
+  SEX_LABEL,
+  ageLabel,
+  fmtDateTime,
+  fmtMoney,
+  orderDue,
+  orderNet,
+  sumPayments,
+} from "@/lib/lab";
 
 type Order = Schema["Order"]["type"];
 type Patient = Schema["Patient"]["type"];
@@ -41,6 +49,9 @@ function ReceiptPage() {
   const [order, setOrder] = useState<Order | null>(null);
   const [patient, setPatient] = useState<Patient | null>(null);
   const [items, setItems] = useState<Item[]>([]);
+  /* الإيصال وثيقة مال بيد المريض: المقبوض فيه يُقرأ من سطور `Payment`
+     لا من النسخة المخبَّأة على الطلب — إيصال يخالف السجل يفتح نزاعًا. */
+  const [payments, setPayments] = useState<Payment[]>([]);
   const [loading, setLoading] = useState(true);
   /* الإيصال والملصقات لا يُطبعان معًا: الأول على ورق A4 أو حرارية إيصالات،
      والثاني على ورق ملصقات. الطباعة الواحدة تفسد أحدهما. */
@@ -69,6 +80,13 @@ function ReceiptPage() {
       ]);
       setPatient(p ?? null);
       setItems([...its].sort((a, b) => (a.sortOrder ?? 100) - (b.sortOrder ?? 100)));
+      // من لا يملك صلاحية على `Payment` يُطبع له الإيصال بالنسخة المخبَّأة
+      // بدل أن تفشل الصفحة كلها — الملصقات لا شأن لها بالمال.
+      try {
+        setPayments(await listPayments(o.id));
+      } catch {
+        setPayments([]);
+      }
       setLoading(false);
     })().catch(() => setLoading(false));
   }, [orderId]);
@@ -99,9 +117,9 @@ function ReceiptPage() {
 
   const total = order.totalPrice ?? 0;
   const discount = order.discount ?? 0;
-  const net = Math.max(0, total - discount);
-  const paid = order.paidAmount ?? 0;
-  const due = Math.max(0, net - paid);
+  const net = orderNet(total, discount);
+  const paid = payments.length ? sumPayments(payments) : order.paidAmount ?? 0;
+  const due = orderDue(net, paid);
 
   return (
     <>

@@ -38,6 +38,8 @@ const schema = a.schema({
 
   Priority: a.enum(["ROUTINE", "URGENT"]),
 
+  PaymentMethod: a.enum(["CASH", "CARD", "TRANSFER", "OTHER"]),
+
   ResultFlag: a.enum([
     "NORMAL",
     "LOW",
@@ -170,8 +172,13 @@ const schema = a.schema({
       amendReason: a.string(),
 
       totalPrice: a.float().default(0),
-      paidAmount: a.float().default(0),
       discount: a.float().default(0),
+
+      /* مجموع الدفعات — نسخة مخبَّأة لا مصدر الحقيقة. المصدر سطور
+         `Payment`، وهذا الحقل يوفّر على القوائم والتقارير استعلامًا لكل
+         طلب. يُعاد احتسابه من السطور بعد كل دفعة وكل إبطال، وصفحة الطلب
+         تصلحه إن وجدته مخالفًا — فأسوأ ما يصيبه تأخّر لا ضياع مال.     */
+      paidAmount: a.float().default(0),
 
       /* يوم إنشاء الطلب (YYYY-MM-DD بالتوقيت المحلي) — مفتاح تقسيم
          لتقارير الفترة. بدونه يقرأ تقرير شهر واحد كل طلبات المختبر منذ
@@ -246,6 +253,47 @@ const schema = a.schema({
       allow.groups(["admin", "quality", "tech"]),
       allow.groups(["reception"]).to(["create", "read", "delete"]),
       allow.groups(["doctor"]).to(["read"]),
+    ]),
+
+  /* ── الدفعات ────────────────────────────────────────────────
+     سطر لكل مبلغ مقبوض، وهو مصدر الحقيقة في المال.
+
+     البديل السابق كان تعديل `paidAmount` على الطلب مباشرة: قراءة ثم
+     كتابة بلا قفل، فدفعتان على الطلب نفسه في اللحظة نفسها تُبقي إحداهما
+     وتمحو الأخرى — مالٌ قُبض من المريض واختفى من النظام. السطور المستقلّة
+     لا تتصادم: كلٌّ يُنشئ صفًّا خاصًّا به.
+
+     ويحلّ الجدول مسألة ثانية: `day` هنا **يوم القبض** لا يوم الطلب، فمن
+     دفع باقي حسابه بعد أسبوع يُحتسب ماله في اليوم الذي قُبض فيه فعلًا —
+     وهو ما يطابق صندوق المحاسب.
+
+     **لا حذف لأحد.** سطر مال يُمحى لا يُراجَع؛ الخطأ يُبطَل بسبب مكتوب
+     ويبقى ظاهرًا. والإبطال لمجموعة `admin` وحدها: من يقبض لا يبطل قبضه. */
+  Payment: a
+    .model({
+      orderId: a.id().required(),
+      // رقم الطلب مجمَّد هنا كي يقرأ تقرير التحصيل اليومي سطوره وحدها
+      // بلا استعلام على كل طلب لمعرفة رقمه.
+      orderNo: a.string().required(),
+      amount: a.float().required(),
+      method: a.ref("PaymentMethod"),
+      receivedBy: a.string().required(),
+      at: a.datetime().required(),
+      day: a.string().required(), // يوم القبض المحلي — مفتاح تقسيم
+      note: a.string(),
+
+      voidedAt: a.datetime(),
+      voidedBy: a.string(),
+      voidReason: a.string(),
+    })
+    .secondaryIndexes((index) => [
+      index("orderId").sortKeys(["at"]).queryField("listPaymentsByOrder"),
+      index("day").sortKeys(["at"]).queryField("listPaymentsByDay"),
+    ])
+    .authorization((allow) => [
+      allow.groups(["admin"]).to(["create", "read", "update"]),
+      allow.groups(["reception"]).to(["create", "read"]),
+      allow.groups(["quality"]).to(["read"]),
     ]),
 
   /* ── سجل التدقيق — يُكتب ولا يُعدَّل ولا يُحذف ───────────────────

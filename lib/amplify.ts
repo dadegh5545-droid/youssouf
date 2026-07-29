@@ -7,7 +7,12 @@ import { Hub } from "aws-amplify/utils";
 import { useEffect, useState } from "react";
 import outputs from "@/amplify_outputs.json";
 import type { Schema } from "@/amplify/data/resource";
-import { localDay, newOrderNo as randomOrderNo, orderStamp } from "@/lib/lab";
+import {
+  localDay,
+  newOrderNo as randomOrderNo,
+  orderStamp,
+  sumPayments,
+} from "@/lib/lab";
 
 Amplify.configure(outputs, { ssr: true });
 
@@ -319,6 +324,89 @@ export function reserveMrn(generate: () => string): Promise<string> {
     },
     "رقم ملف"
   );
+}
+
+/* ── الدفعات ───────────────────────────────────────────────────
+   سطور `Payment` هي مصدر الحقيقة، و`Order.paidAmount` نسخة مخبَّأة
+   تُعاد من السطور بعد كل تغيير. ترتيب العمليات مقصود: يُكتب السطر أولًا
+   ثم تُحدَّث النسخة — لو انقطع الاتصال بينهما بقي المال مسجَّلًا وتأخّرت
+   النسخة، وتصلحها أول قراءة لصفحة الطلب. العكس يفقد المال.        */
+
+export type Payment = Schema["Payment"]["type"];
+
+/** كل دفعات طلب، الأقدم أولًا. */
+export function listPayments(orderId: string): Promise<Payment[]> {
+  return listAll<Payment>((nextToken) =>
+    client.models.Payment.listPaymentsByOrder({ orderId }, { limit: 200, nextToken })
+  );
+}
+
+/**
+ * يعيد احتساب `paidAmount` من السطور ويكتبه.
+ *
+ * @param cached القيمة المحفوظة على الطلب، أو `null` إذا كنّا قد غيّرنا
+ *   السطور للتوّ. تمرير الرقم يجعل الكتابة مشروطة باختلافه عن المجموع،
+ *   فلا تُحدَّث الطلبات بلا سبب في كل فتح لصفحة. و`null` يكتب دائمًا —
+ *   بعد دفعة أو إبطال نعرف أن النسخة قديمة، ومقارنتها بصفر افتراضي كانت
+ *   تُسكت الكتابة حين يعود المجموع إلى صفر بإبطال كل الدفعات.
+ */
+export async function syncPaidAmount(
+  orderId: string,
+  cached: number | null
+): Promise<{ paid: number; payments: Payment[]; repaired: boolean }> {
+  const payments = await listPayments(orderId);
+  const paid = sumPayments(payments);
+  const repaired = cached === null || Math.abs(paid - cached) > 0.005;
+  if (repaired) {
+    const { errors } = await client.models.Order.update({ id: orderId, paidAmount: paid });
+    if (errors?.length) throw new Error(errors[0].message);
+  }
+  return { paid, payments, repaired };
+}
+
+/** تسجيل دفعة: سطر جديد ثم تحديث النسخة المخبَّأة. */
+export async function addPayment(input: {
+  orderId: string;
+  orderNo: string;
+  amount: number;
+  method: string;
+  actor: string;
+  note?: string;
+}): Promise<{ paid: number; payments: Payment[] }> {
+  const now = new Date();
+  const { data, errors } = await client.models.Payment.create({
+    orderId: input.orderId,
+    orderNo: input.orderNo,
+    amount: input.amount,
+    method: input.method as Payment["method"],
+    receivedBy: input.actor,
+    note: input.note || undefined,
+    at: now.toISOString(),
+    // يوم القبض لا يوم الطلب: من دفع باقي حسابه بعد أسبوع يُحتسب ماله
+    // في اليوم الذي قُبض فيه، وهو ما يطابق صندوق المحاسب.
+    day: localDay(now),
+  });
+  if (errors?.length) throw new Error(errors[0].message);
+  if (!data) throw new Error("لم تُسجَّل الدفعة");
+
+  const { paid, payments } = await syncPaidAmount(input.orderId, null);
+  return { paid, payments };
+}
+
+/** إبطال دفعة بسبب مكتوب — لا حذف: سطر مال يُمحى لا يُراجَع. */
+export async function voidPayment(
+  payment: Payment,
+  reason: string,
+  actor: string
+): Promise<{ paid: number; payments: Payment[] }> {
+  const { errors } = await client.models.Payment.update({
+    id: payment.id,
+    voidedAt: new Date().toISOString(),
+    voidedBy: actor,
+    voidReason: reason,
+  });
+  if (errors?.length) throw new Error(errors[0].message);
+  return syncPaidAmount(payment.orderId, null);
 }
 
 /** كتابة سطر في سجل التدقيق — لا يُفشل العملية الأصلية إذا تعذّر. */

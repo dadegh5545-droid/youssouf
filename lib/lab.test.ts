@@ -15,9 +15,13 @@ import {
   localDay,
   newMrn,
   newOrderNo,
+  orderDue,
+  orderNet,
   orderStamp,
   pickRange,
   rangeLabel,
+  roundMoney,
+  sumPayments,
   verificationCode,
 } from "./lab";
 import { SEED_TESTS } from "./seedTests";
@@ -332,6 +336,33 @@ check(
   newOrderNo().startsWith(`LAB-${orderStamp()}-`),
   true
 );
+
+/* ── ١٠. المال: جمع الدفعات والمتبقّي ────────────────────────────
+   خطأ هنا لا يظهر كعطل بل كمبلغ خاطئ في يد المريض أو في الصندوق.
+   والدفعة المبطَلة يجب ألا تُحتسب مهما بقي سطرها ظاهرًا.        */
+group("المال — الدفعات والمتبقّي");
+
+const pay = (amount: number, voidedAt?: string) => ({ amount, voidedAt });
+
+check("مجموع دفعتين", sumPayments([pay(100), pay(50)]), 150);
+check("لا دفعات = صفر", sumPayments([]), 0);
+check("قائمة معدومة = صفر", sumPayments(null), 0);
+// الإبطال لا يحذف السطر، فلو حُسب لبقي مالٌ ملغى في التقرير إلى الأبد.
+check("المبطَلة لا تُحتسب", sumPayments([pay(100), pay(50, "2026-07-29T10:00:00Z")]), 100);
+check("سطر معدوم يُتخطّى", sumPayments([pay(100), null, undefined]), 100);
+/* الزحف العشري يترك «متبقّيًا» بكسر لا يستطيع المريض دفعه، فيبقى الطلب
+   غير مسدَّد أبدًا: 0.1 + 0.2 = 0.30000000000000004 */
+check("الزحف العشري يُقرَّب", sumPayments([pay(0.1), pay(0.2)]), 0.3);
+check("عشر دفعات صغيرة", sumPayments(Array.from({ length: 10 }, () => pay(0.1))), 1);
+
+check("الصافي بعد الخصم", orderNet(500, 50), 450);
+check("خصم أكبر من الإجمالي لا يعطي سالبًا", orderNet(100, 300), 0);
+check("الصافي بلا قيم", orderNet(null, null), 0);
+check("المتبقّي", orderDue(450, 200), 250);
+check("دفع كامل = لا متبقّي", orderDue(450, 450), 0);
+check("دفع زائد لا يعطي سالبًا", orderDue(450, 500), 0);
+check("متبقّي كسري يُقرَّب", orderDue(orderNet(0.3, 0), sumPayments([pay(0.1), pay(0.2)])), 0);
+check("تقريب المال", roundMoney(1.005 + 0.0049), 1.01);
 
 /* ── النتيجة ───────────────────────────────────────────────── */
 console.log(

@@ -3,11 +3,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { client, listAll, useSession } from "@/lib/amplify";
 import { useLabConfig } from "@/lib/config";
-import { fmtMoney, localDay } from "@/lib/lab";
+import {
+  PAYMENT_METHOD_LABEL,
+  fmtMoney,
+  localDay,
+  orderDue,
+  orderNet,
+  roundMoney,
+  sumPayments,
+} from "@/lib/lab";
 import type { Schema } from "@/amplify/data/resource";
 
 type Order = Schema["Order"]["type"];
 type Item = Schema["OrderItem"]["type"];
+type Payment = Schema["Payment"]["type"];
 
 /**
  * تقارير الإدارة — الإيراد والإنتاجية والجودة على فترة.
@@ -67,6 +76,7 @@ export default function ReportsPage() {
   const [from, setFrom] = useState(firstOfMonth);
   const [to, setTo] = useState(() => localDay());
   const [orders, setOrders] = useState<Order[]>([]);
+  const [payments, setPayments] = useState<Payment[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [ran, setRan] = useState(false);
@@ -84,14 +94,31 @@ export default function ReportsPage() {
     setErr("");
     setTests([]);
     try {
-      const pages = await Promise.all(
-        days.map((d) =>
-          listAll<Order>((nextToken) =>
-            client.models.Order.listOrdersByDay({ day: d }, { limit: 500, nextToken })
+      /* الطلبات بيوم إنشائها، والدفعات بيوم قبضها — يومان مختلفان عن قصد.
+         من دفع باقي حسابه بعد أسبوع يُحتسب ماله في اليوم الذي قُبض فيه،
+         وهو ما يطابق صندوق المحاسب. الاحتساب من `paidAmount` على طلبات
+         الفترة كان ينسب ذلك المال إلى يوم الطلب لا يوم القبض. */
+      const [orderPages, paymentPages] = await Promise.all([
+        Promise.all(
+          days.map((d) =>
+            listAll<Order>((nextToken) =>
+              client.models.Order.listOrdersByDay({ day: d }, { limit: 500, nextToken })
+            )
           )
-        )
-      );
-      setOrders(pages.flat());
+        ),
+        Promise.all(
+          days.map((d) =>
+            listAll<Payment>((nextToken) =>
+              client.models.Payment.listPaymentsByDay(
+                { day: d },
+                { limit: 500, nextToken }
+              )
+            )
+          )
+        ),
+      ]);
+      setOrders(orderPages.flat());
+      setPayments(paymentPages.flat());
       setRan(true);
     } catch (e) {
       setErr(`تعذّر جلب التقرير: ${(e as Error).message}`);
@@ -113,10 +140,20 @@ export default function ReportsPage() {
     const gross = live.reduce((n, o) => n + (o.totalPrice ?? 0), 0);
     const discount = live.reduce((n, o) => n + (o.discount ?? 0), 0);
     const net = gross - discount;
-    const collected = live.reduce((n, o) => n + (o.paidAmount ?? 0), 0);
+
+    // التحصيل من سجل الدفعات بيوم القبض — مالٌ دخل الصندوق في الفترة.
+    const collected = sumPayments(payments);
+    const byMethod = new Map<string, number>();
+    for (const p of payments) {
+      if (p.voidedAt) continue;
+      const k = p.method ?? "OTHER";
+      byMethod.set(k, roundMoney((byMethod.get(k) ?? 0) + (p.amount ?? 0)));
+    }
+    const voided = payments.filter((p) => p.voidedAt);
+
+    // المتبقّي على طلبات الفترة — سؤال آخر: ذمم لا صندوق.
     const due = live.reduce(
-      (n, o) =>
-        n + Math.max(0, (o.totalPrice ?? 0) - (o.discount ?? 0) - (o.paidAmount ?? 0)),
+      (n, o) => n + orderDue(orderNet(o.totalPrice, o.discount), o.paidAmount ?? 0),
       0
     );
 
@@ -151,6 +188,8 @@ export default function ReportsPage() {
       discount,
       net,
       collected,
+      byMethod,
+      voided,
       due,
       avgTicket: live.length ? net / live.length : 0,
       tatAvg: tat.length ? tat.reduce((a, b) => a + b, 0) / tat.length : null,
@@ -164,7 +203,7 @@ export default function ReportsPage() {
       urgent,
       amended,
     };
-  }, [orders, days]);
+  }, [orders, payments, days]);
 
   /** أكثر الفحوصات طلبًا — استعلام لكل طلب، لذلك بزرّ منفصل. */
   async function loadTests() {
@@ -287,18 +326,39 @@ export default function ReportsPage() {
           </div>
         </div>
         <div className="stat">
-          <div className="label">المحصَّل</div>
+          <div className="label">التحصيل في الفترة</div>
           <div className="value">{fmtMoney(s.collected, currency)}</div>
           <div className="sub">
-            {s.net > 0 ? `${Math.round((s.collected / s.net) * 100)}٪ من الصافي` : "—"}
+            {Array.from(s.byMethod.entries())
+              .map(([k, v]) => `${PAYMENT_METHOD_LABEL[k] ?? k} ${fmtMoney(v, currency)}`)
+              .join(" · ") || "لا دفعات"}
           </div>
         </div>
         <div className={`stat${s.due > 0 ? " warn-accent" : ""}`}>
           <div className="label">ذمم غير محصَّلة</div>
           <div className="value">{fmtMoney(s.due, currency)}</div>
-          <div className="sub">متبقٍّ على المرضى</div>
+          <div className="sub">متبقٍّ على طلبات الفترة</div>
         </div>
       </div>
+
+      {/* الرقمان يقيسان شيئين مختلفين، وخلطهما يجعل المحاسب يبحث عن فرق
+          ليس خطأً. صافي الإيراد فوترةُ طلبات أُنشئت في الفترة، والتحصيل
+          مالٌ قُبض فيها — وقد يكون على طلبات أقدم. */}
+      <p className="muted small" style={{ marginTop: -8 }}>
+        «صافي الإيراد» فوترة طلبات أُنشئت في الفترة، و«التحصيل» مالٌ قُبض فيها
+        ولو كان على طلبات أقدم — فلا يتطابقان بالضرورة.
+        {s.voided.length > 0 && (
+          <>
+            {" "}
+            ويوجد <strong>{s.voided.length}</strong> دفعة مُبطلة في هذه الفترة
+            بمجموع {fmtMoney(
+              roundMoney(s.voided.reduce((n, p) => n + (p.amount ?? 0), 0)),
+              currency
+            )}{" "}
+            — غير محتسبة أعلاه وتفصيلها في سجل التدقيق.
+          </>
+        )}
+      </p>
 
       <div className="grid cols-4" style={{ marginBottom: 16 }}>
         <div className="stat">

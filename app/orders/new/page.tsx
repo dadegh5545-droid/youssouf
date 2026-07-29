@@ -2,15 +2,24 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { audit, client, listAll, nextOrderNo, useSession } from "@/lib/amplify";
+import {
+  addPayment,
+  audit,
+  client,
+  listAll,
+  nextOrderNo,
+  useSession,
+} from "@/lib/amplify";
 import type { Schema } from "@/amplify/data/resource";
 import {
   DEPARTMENT_LABEL,
+  PAYMENT_METHOD_LABEL,
   SEX_LABEL,
   ageInYears,
   ageLabel,
   fmtMoney,
   localDay,
+  orderNet,
   pickRange,
   rangeLabel,
 } from "@/lib/lab";
@@ -42,6 +51,7 @@ function NewOrder() {
   const [urgent, setUrgent] = useState(false);
   const [discount, setDiscount] = useState(0);
   const [paid, setPaid] = useState(0);
+  const [method, setMethod] = useState("CASH");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
 
@@ -96,7 +106,7 @@ function NewOrder() {
   }, [patients, patientQ]);
 
   const total = picked.reduce((s, code) => s + (byCode.get(code)?.price ?? 0), 0);
-  const net = Math.max(0, total - discount);
+  const net = orderNet(total, discount);
 
   function toggle(code: string) {
     setPicked((cur) =>
@@ -142,7 +152,9 @@ function NewOrder() {
         clinicalNotes: notes || undefined,
         totalPrice: total,
         discount,
-        paidAmount: paid,
+        // المقبوض يأتي من سطر `Payment` أدناه لا من هنا: النسخة المخبَّأة
+        // تُحتسب من السجل، وكتابتها هنا تسبق السطر فتتناقض معه لو تعذّر.
+        paidAmount: 0,
         day: localDay(),
       });
       if (errors?.length) throw new Error(errors[0].message);
@@ -196,6 +208,38 @@ function NewOrder() {
         actor: session.actor,
         summary: `طلب ${orderNo} — ${items.length} فحص للمريض ${patient.fullName}`,
       });
+
+      /* الدفعة الأولى سطر في السجل كأي دفعة أخرى. فشلها لا يُلغي الطلب —
+         الطلب صحيح والفحوصات قائمة، الناقص تسجيل مال. ننقل الموظف إلى
+         صفحة الطلب برسالة صريحة وزرّ التسجيل أمامه، فلا يضيع القبض
+         ولا يُلغى عمل صحيح. */
+      if (paid > 0) {
+        try {
+          await addPayment({
+            orderId: order.id,
+            orderNo,
+            amount: Math.min(paid, net),
+            method,
+            actor: session.actor,
+          });
+          await audit({
+            entity: "Order",
+            entityId: order.id,
+            action: "PAYMENT_RECORDED",
+            actor: session.actor,
+            summary: `دفعة أولى ${fmtMoney(Math.min(paid, net))} (${
+              PAYMENT_METHOD_LABEL[method] ?? method
+            }) على الطلب ${orderNo}`,
+          });
+        } catch (payErr) {
+          router.push(
+            `/orders/view?id=${order.id}&payfail=${encodeURIComponent(
+              (payErr as Error).message
+            )}`
+          );
+          return;
+        }
+      }
 
       router.push(`/orders/view?id=${order.id}`);
     } catch (err) {
@@ -374,12 +418,32 @@ function NewOrder() {
           </div>
           <div className="field">
             <label>المدفوع</label>
-            <input
-              type="number"
-              min={0}
-              value={paid}
-              onChange={(e) => setPaid(Number(e.target.value) || 0)}
-            />
+            <div className="row">
+              <input
+                type="number"
+                min={0}
+                max={net}
+                value={paid}
+                onChange={(e) => setPaid(Number(e.target.value) || 0)}
+              />
+              <select
+                value={method}
+                onChange={(e) => setMethod(e.target.value)}
+                aria-label="طريقة الدفع"
+                disabled={paid <= 0}
+              >
+                {Object.entries(PAYMENT_METHOD_LABEL).map(([k, label]) => (
+                  <option key={k} value={k}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {paid > net && (
+              <div className="hint">
+                أكبر من الصافي — سيُسجَّل {fmtMoney(net)} فقط.
+              </div>
+            )}
           </div>
         </div>
         <div className="row" style={{ marginTop: 18 }}>

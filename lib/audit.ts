@@ -21,6 +21,7 @@ export const ACTION_LABEL: Record<string, string> = {
   TUBE_MISMATCH: "أنبوب غير مطابق",
   DAY_BACKFILLED: "ملء رجعي ليوم الطلب",
   PAYMENT_RECORDED: "تسجيل دفعة",
+  PAYMENT_VOIDED: "إبطال دفعة",
   PRICE_CHANGED: "تغيير سعر",
   TEST_CREATED: "إضافة فحص",
   TEST_UPDATED: "تعديل فحص",
@@ -38,6 +39,8 @@ export const NOTABLE = new Set([
   "ORDER_CANCELLED",
   // «كاد أن يقع»: أنبوب مريض أمام طلب مريض آخر. أهمّ ما يُراجَع.
   "TUBE_MISMATCH",
+  // مال قُبض ثم أُلغي قبضه — أول ما تسأل عنه مراجعة الصندوق.
+  "PAYMENT_VOIDED",
   "PRICE_CHANGED",
   "STAFF_ADD_GROUP",
   "STAFF_REMOVE_GROUP",

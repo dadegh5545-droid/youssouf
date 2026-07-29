@@ -319,6 +319,49 @@ export function fmtMoney(v?: number | null, symbol?: string): string {
   return `${(v ?? 0).toLocaleString(LOCALE, { maximumFractionDigits: 2 })} ${unit}`;
 }
 
+/**
+ * تقريب إلى خانتين عشريتين.
+ *
+ * جمع الفواصل العائمة يزحف: ٠٫١ + ٠٫٢ = ٠٫٣٠٠٠٠٠٠٠٠٠٠٠٠٠٠٠٤. عشر دفعات
+ * صغيرة تترك «متبقّيًا» بكسر لا يراه المريض ولا يستطيع دفعه، فيبقى الطلب
+ * غير مسدَّد إلى الأبد.
+ */
+export function roundMoney(v: number): number {
+  return Math.round(v * 100) / 100;
+}
+
+export const PAYMENT_METHOD_LABEL: Record<string, string> = {
+  CASH: "نقدًا",
+  CARD: "شبكة",
+  TRANSFER: "تحويل",
+  OTHER: "أخرى",
+};
+
+export type PaymentLike = {
+  amount?: number | null;
+  voidedAt?: string | null;
+};
+
+/** المقبوض فعلًا: مجموع الدفعات غير المبطَلة. */
+export function sumPayments(
+  rows: readonly (PaymentLike | null | undefined)[] | null | undefined
+): number {
+  const total = (rows ?? [])
+    .filter((p): p is PaymentLike => !!p && !p.voidedAt)
+    .reduce((n, p) => n + (p.amount ?? 0), 0);
+  return roundMoney(total);
+}
+
+/** صافي الفاتورة بعد الخصم — لا يقلّ عن صفر مهما كان الخصم. */
+export function orderNet(totalPrice?: number | null, discount?: number | null): number {
+  return roundMoney(Math.max(0, (totalPrice ?? 0) - (discount ?? 0)));
+}
+
+/** المتبقّي على الطلب. */
+export function orderDue(net: number, paid: number): number {
+  return roundMoney(Math.max(0, net - paid));
+}
+
 export function isToday(iso?: string | null): boolean {
   if (!iso) return false;
   const d = new Date(iso);
