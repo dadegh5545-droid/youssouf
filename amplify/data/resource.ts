@@ -82,6 +82,21 @@ const schema = a.schema({
       panelOf: a.string().array(), // باقة: أكواد الفحوصات المكوّنة لها
       sortOrder: a.integer().default(100),
       active: a.boolean().default(true),
+
+      /* اعتماد المديات المرجعية (ISO 15189 §5.5.2).
+         المديات في الكتالوج تصل مع البذرة تقريبيّة، ومختبر يعمل بمرضى
+         حقيقيين لا يجوز أن يعلّم نتيجة «طبيعية» أو «حرجة» بمدى لم يراجعه
+         مسؤول الجودة وفق أجهزته وكواشفه ومجتمع مرضاه. هذان الحقلان
+         يحوّلان التحذير من سطر في التوثيق إلى حالة ظاهرة في كل شاشة:
+         بلا اعتماد يظهر الفحص موسومًا في الكتالوج وشاشة النتائج وعلى
+         التقرير المطبوع.
+
+         `rangesHash` بصمة المديات وقت الاعتماد: تعديلها بعده يُسقط
+         الاعتماد تلقائيًا، وإلا صار الاعتماد ختمًا يُؤخذ مرة ثم تُغيَّر
+         الأرقام تحته.                                                */
+      rangesApprovedBy: a.string(),
+      rangesApprovedAt: a.datetime(),
+      rangesHash: a.string(),
     })
     .secondaryIndexes((index) => [index("code").queryField("listLabTestsByCode")])
     .authorization((allow) => [
@@ -98,6 +113,14 @@ const schema = a.schema({
     .model({
       key: a.string().required(), // "MAIN" — سجل مفرد
       labName: a.string(),
+      /* ترويسة التقرير المطبوع. كانت ثابتة في الكود بقيم مُختلَقة —
+         «ترخيص وزارة الصحة رقم 1234/م» و«الرياض — هاتف 0112345678» —
+         تُطبع على كل تقرير مختبري. رقم ترخيص مُختلَق لجهة تنظيمية على
+         وثيقة طبية‑قانونية خطر قانوني، ولا سبيل كان لضبطه ولا لإخفائه.
+         الآن تأتي من إعدادات المختبر، والفارغ منها لا يُطبع أصلًا. */
+      labNameEn: a.string(),
+      licenseNo: a.string(), // رقم الترخيص كما تصدره الجهة التنظيمية
+      contact: a.string(), // العنوان والهاتف
       currency: a.string(), // الرمز المعروض: ر.س · $ · ﷼ …
       currencyCode: a.string(), // SAR · USD · YER — للفواتير والتصدير
       sampleTypes: a.string().array(), // دم وريدي · بول · براز · مسحة …
@@ -193,8 +216,19 @@ const schema = a.schema({
     ])
     .authorization((allow) => [
       allow.groups(["admin", "reception"]),
-      allow.groups(["quality", "tech"]).to(["read", "update"]),
-      allow.groups(["doctor"]).to(["read"]),
+      /* `quality` يعتمد النتائج ويصحّح التقارير المعتمدة، فيحتاج `update`.
+         `tech` كان يملكها أيضًا وهو لا يحتاجها: عمله على `OrderItem`،
+         وحالة الطلب تنتقل إلى `IN_PROGRESS`/`PENDING_REVIEW` بحفظ
+         النتائج.
+
+         ⚠️ قيد باقٍ معروف: صلاحيات AppSync على مستوى العملية لا الحقل،
+         فمن يملك `update` على `Order` يملكه على كل حقوله — بما فيها
+         `status` و`approvedBy` و`discount`. أي أن `quality` يستطيع من
+         خارج الواجهة كتابة اعتماد باسم غيره أو تغيير خصم. الإغلاق الكامل
+         ينقل الاعتماد وحقول المال إلى عمليات مخصّصة تنفّذها Lambda —
+         مسجَّل في «المرحلة التالية». */
+      allow.groups(["quality"]).to(["read", "update"]),
+      allow.groups(["tech", "doctor"]).to(["read"]),
     ]),
 
   /* ── سطر داخل الطلب: فحص واحد ونتيجته ───────────────────────── */
@@ -221,6 +255,10 @@ const schema = a.schema({
       refText: a.string(), // نص المدى كما يظهر في التقرير
       criticalLow: a.float(),
       criticalHigh: a.float(),
+      /* هل كان مدى هذا الفحص معتمدًا وقت الطلب؟ مجمَّد كبقية أرقام
+         المدى: تقرير طُبع بمدى غير معتمد يجب أن يبقى معلومًا أنه كذلك
+         مهما اعتُمد الفحص لاحقًا. */
+      refApproved: a.boolean().default(false),
       sortOrder: a.integer().default(100),
 
       // النتيجة
@@ -250,8 +288,13 @@ const schema = a.schema({
         .queryField("listPendingCriticals"),
     ])
     .authorization((allow) => [
-      allow.groups(["admin", "quality", "tech"]),
-      allow.groups(["reception"]).to(["create", "read", "delete"]),
+      /* لا `delete` لأحد. حذف سطر نتيجة يغيّر `verificationCode` المطبوع
+         على التقرير، فتبدو النسخة الورقية بيد المريض «مزوّرة» بلا أن
+         يتحرّك `reportRevision` — ولا سطر في التطبيق يحذف `OrderItem`
+         أصلًا، فالمنحة كانت زائدة بالكامل. الطلب الخطأ يُلغى بسبب مكتوب،
+         لا تُمحى سطوره. */
+      allow.groups(["admin", "quality", "tech"]).to(["create", "read", "update"]),
+      allow.groups(["reception"]).to(["create", "read"]),
       allow.groups(["doctor"]).to(["read"]),
     ]),
 
@@ -322,8 +365,24 @@ const schema = a.schema({
       index("entityId").sortKeys(["at"]).queryField("listAuditByEntity"),
     ])
     .authorization((allow) => [
-      // الزائر لا يكتب ولا يقرأ سجل التدقيق — لا شأن له به.
-      allow.authenticated().to(["create", "read"]),
+      /* القراءة لمن يراجع لا لمن يُراجَع عمله. كانت `allow.authenticated()`
+         فكان أي حساب — فنّي أو طبيب أو حساب بلا مجموعة أصلًا — يقرأ لقطات
+         `before/after` ومبالغ الدفعات وتغييرات الصلاحيات، وهي بيانات لا
+         يملك `read` عليها في جداولها. */
+      /* ⚠️ كل مجموعة في قاعدة واحدة فقط: تكرار المجموعة نفسها في قاعدتين
+         على النموذج نفسه يرفضه Amplify عند النشر
+         (`@auth … staticGroup:admin … already exists`). */
+      allow.groups(["admin", "quality"]).to(["create", "read"]),
+
+      /* الكتابة لمن يعمل في النظام فعلًا — وهي **ليست حصانة**: `actor`
+         يأتي من العميل (`lib/amplify.ts`)، فمن يملك `create` يستطيع دسّ
+         سطر يشهد بما لم يقع — ولأن لا أحد يملك `update`/`delete` عمدًا،
+         السطر المدسوس لا يُصحَّح أبدًا.
+
+         ⚠️ الإغلاق الكامل يحتاج نقل الكتابة إلى دالة تشتقّ `actor` من
+         `event.identity` لا من الطلب — كما تفعل `manage-staff`. مسجَّل في
+         «المرحلة التالية»، وتضييق المجموعات هنا يقلّل السطح ولا يزيله. */
+      allow.groups(["tech", "reception", "doctor"]).to(["create"]),
     ]),
 
   /* ── بوابة تقرير المريض ──────────────────────────────────────

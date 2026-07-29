@@ -5,7 +5,16 @@ import { audit, client, listAll, useSession } from "@/lib/amplify";
 import type { Schema } from "@/amplify/data/resource";
 import { useLabConfig } from "@/lib/config";
 import { SEED_TESTS } from "@/lib/seedTests";
-import { DEPARTMENT_LABEL, SEX_LABEL, fmtMoney, rangeLabel } from "@/lib/lab";
+import {
+  APPROVAL_LABEL,
+  DEPARTMENT_LABEL,
+  SEX_LABEL,
+  approvalState,
+  fmtDateTime,
+  fmtMoney,
+  rangeLabel,
+  rangesFingerprint,
+} from "@/lib/lab";
 
 type LabTest = Schema["LabTest"]["type"];
 
@@ -111,6 +120,7 @@ export default function CatalogPage() {
   const [tests, setTests] = useState<LabTest[]>([]);
   const [q, setQ] = useState("");
   const [dept, setDept] = useState("");
+  const [onlyUnapproved, setOnlyUnapproved] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
@@ -313,10 +323,74 @@ export default function CatalogPage() {
     }
   }
 
+  /**
+   * اعتماد المديات المرجعية والحدود الحرجة لفحص (ISO 15189 §5.5.2).
+   *
+   * المديات تصل مع بذرة الكتالوج تقريبيّة، ومختبر يعمل بمرضى حقيقيين لا
+   * يجوز أن يعلّم نتيجة «طبيعية» أو «حرجة» بمدى لم يراجعه أحد وفق أجهزته
+   * وكواشفه ومجتمع مرضاه.
+   *
+   * تُحفظ مع الاعتماد بصمة الأرقام وقتها، فتعديل أيّ مدى أو حدّ حرج بعده
+   * يُسقط الاعتماد تلقائيًا — بلا البصمة يصير الاعتماد ختمًا يُؤخذ مرة ثم
+   * تُبدَّل الأرقام تحته، وهو أسوأ من غياب الاعتماد لأنه يطمئن كذبًا.
+   */
+  async function approveRanges(t: LabTest) {
+    const state = approvalState(t);
+    const ok = window.confirm(
+      `اعتماد المديات المرجعية للفحص «${t.nameAr}» (${t.code}).\n\n` +
+        (state === "STALE"
+          ? "تنبيه: هذا الفحص عُدّل بعد اعتماد سابق.\n\n"
+          : "") +
+        "بالاعتماد تُقرّ أنك راجعت المديات والحدود الحرجة وفق أجهزة المختبر " +
+        "وكواشفه ومجتمع مرضاه. سيُسجَّل اسمك ووقت الاعتماد في سجل التدقيق.\n\n" +
+        "متابعة؟"
+    );
+    if (!ok) return;
+
+    setBusy(true);
+    setMsg("");
+    try {
+      const now = new Date().toISOString();
+      const { errors } = await client.models.LabTest.update({
+        id: t.id,
+        rangesApprovedBy: session.actor,
+        rangesApprovedAt: now,
+        rangesHash: rangesFingerprint(t),
+      });
+      if (errors?.length) throw new Error(errors[0].message);
+      await audit({
+        entity: "LabTest",
+        entityId: t.id,
+        action: "RANGES_APPROVED",
+        actor: session.actor,
+        summary: `اعتماد المديات المرجعية للفحص ${t.code} — ${t.nameAr}`,
+        after: {
+          ranges: t.ranges,
+          criticalLow: t.criticalLow,
+          criticalHigh: t.criticalHigh,
+        },
+      });
+      setMsg(`اعتُمدت مديات ${t.code}.`);
+      await load();
+    } catch (e) {
+      setMsg(`تعذّر الاعتماد: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /* عدّاد غير المعتمد: الرقم في الترويسة هو ما يجعل النقص مرئيًّا. بلا
+     عدّاد يبقى «غير معتمد» وسمًا في صفّ لا يراه إلا من يبحث عنه. */
+  const unapproved = useMemo(
+    () => tests.filter((t) => t.active !== false && approvalState(t) !== "APPROVED"),
+    [tests]
+  );
+
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();
     return tests
       .filter((t) => (dept ? t.department === dept : true))
+      .filter((t) => (onlyUnapproved ? approvalState(t) !== "APPROVED" : true))
       .filter((t) =>
         term
           ? t.nameAr?.toLowerCase().includes(term) ||
@@ -325,7 +399,7 @@ export default function CatalogPage() {
           : true
       )
       .sort((a, b) => (a.sortOrder ?? 100) - (b.sortOrder ?? 100));
-  }, [tests, q, dept]);
+  }, [tests, q, dept, onlyUnapproved]);
 
   const canManage = session.can("manageCatalog");
 
@@ -358,6 +432,31 @@ export default function CatalogPage() {
       </div>
 
       {msg && <div className="alert">{msg}</div>}
+
+      {/* أهمّ لافتة في التطبيق لمختبر يعمل بمرضى حقيقيين: مدى غير معتمد
+          يعني أن النظام يعلّم نتيجةً «طبيعية» أو «حرجة» برقم لم يراجعه
+          أحد. الخطأ هنا لا يظهر كعطل بل كطمأنة في غير موضعها. */}
+      {!loading && unapproved.length > 0 && (
+        <div className="alert warn">
+          ⚠️ <strong>{unapproved.length}</strong> فحصًا فعّالًا بمديات مرجعية{" "}
+          <strong>غير معتمدة</strong> من مسؤول الجودة. النتائج تُعلَّم «طبيعية» أو
+          «حرجة» بهذه المديات، وتظهر مع تنبيه على التقرير المطبوع حتى تُعتمد.
+          <div style={{ marginTop: 8 }}>
+            <button
+              className={`btn sm${onlyUnapproved ? " primary" : ""}`}
+              onClick={() => setOnlyUnapproved((v) => !v)}
+            >
+              {onlyUnapproved ? "عرض الكل" : "عرض غير المعتمد وحده"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!loading && tests.length > 0 && unapproved.length === 0 && (
+        <div className="alert ok">
+          ✓ كل الفحوصات الفعّالة مدياتها معتمدة من مسؤول الجودة.
+        </div>
+      )}
 
       {tests.length === 0 && !loading && (
         <div className="alert warn">
@@ -464,6 +563,30 @@ export default function CatalogPage() {
                               {rangeLabel(r?.low, r?.high, r?.text)}
                             </div>
                           ))}
+                      {(() => {
+                        const st = approvalState(t);
+                        const meta = APPROVAL_LABEL[st];
+                        return (
+                          <div style={{ marginTop: 4 }}>
+                            <span className={`badge ${meta.tone}`}>{meta.label}</span>
+                            {st === "APPROVED" && (
+                              <div className="muted small">
+                                {t.rangesApprovedBy} · {fmtDateTime(t.rangesApprovedAt)}
+                              </div>
+                            )}
+                            {canManage && st !== "APPROVED" && (
+                              <button
+                                className="btn sm"
+                                style={{ marginTop: 4 }}
+                                onClick={() => approveRanges(t)}
+                                disabled={busy}
+                              >
+                                اعتماد
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td className="small nowrap">
                       {t.criticalLow != null || t.criticalHigh != null ? (

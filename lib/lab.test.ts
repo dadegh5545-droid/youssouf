@@ -7,9 +7,15 @@
  */
 
 import {
+  ageInMonths,
+  ageInYears,
+  ageLabel,
+  approvalState,
   computeFlag,
   computeTextFlag,
   dayOf,
+  isRangesApproved,
+  rangesFingerprint,
   fmtDateTime,
   fmtMoney,
   localDay,
@@ -248,9 +254,34 @@ check(
   new Set(entries.map(([, p]) => p)).size,
   entries.length
 );
+/* تثبيت الأنماط بالقيم المعيارية.
+   الفحوص البنيوية أعلاه تمرّ كلها على جدول مبدَّل فيه نمطا `1` و`2` —
+   تحقّقتُ من ذلك — لأن لا شيء فيها يربط حرفًا بنمطه. وملصق مطبوع بجدول
+   مبدَّل يُمسح بنجاح ويعطي رقمًا آخر موجودًا فعلًا: عيّنة تُنسب إلى مريض
+   غير صاحبها. العيّنة أدناه من معيار Code 39، وتكفي لكشف أي تبديل. */
+const CODE39_PINNED: Record<string, string> = {
+  "0": "nnnwwnwnn",
+  "1": "wnnwnnnnw",
+  "2": "nnwwnnnnw",
+  "3": "wnwwnnnnn",
+  "7": "nnnwnnwnw",
+  "9": "nnwwnnwnn",
+  A: "wnnnnwnnw",
+  B: "nnwnnwnnw",
+  L: "nnwnnnnww",
+  Z: "nwwnwnnnn",
+  "-": "nwnnnnwnw",
+  "*": "nwnnwnwnn",
+};
 check(
-  "كل حرف يبدأ وينتهي بخط",
-  entries.every(([, p]) => p.length === 9),
+  "الأنماط مطابقة للمعيار (تثبيت)",
+  Object.entries(CODE39_PINNED).every(([ch, p]) => CODE39[ch] === p),
+  true
+);
+// الفحص السابق كان نسخة حرفية من «كل نمط تسعة عناصر» تحت عنوان آخر.
+check(
+  "كل حرف يبدأ بخط وينتهي بخط",
+  entries.every(([, p]) => p.length === 9 && p.length % 2 === 1),
   true
 );
 
@@ -363,6 +394,118 @@ check("دفع كامل = لا متبقّي", orderDue(450, 450), 0);
 check("دفع زائد لا يعطي سالبًا", orderDue(450, 500), 0);
 check("متبقّي كسري يُقرَّب", orderDue(orderNet(0.3, 0), sumPayments([pay(0.1), pay(0.2)])), 0);
 check("تقريب المال", roundMoney(1.005 + 0.0049), 1.01);
+
+/* ── ١١. اعتماد المديات المرجعية ─────────────────────────────────
+   الاعتماد يجب أن يسقط إذا غُيّرت الأرقام بعده، وإلا صار ختمًا يُؤخذ مرة
+   ثم تُبدَّل المديات تحته — وهو أسوأ من غياب الاعتماد لأنه يطمئن كذبًا. */
+group("اعتماد المديات المرجعية");
+
+const RANGES = [{ sex: "MALE", low: 13, high: 17 }, { sex: "FEMALE", low: 12, high: 15 }];
+const approvedTest = {
+  ranges: RANGES,
+  criticalLow: 7,
+  criticalHigh: 20,
+  rangesApprovedAt: "2026-07-29T09:00:00Z",
+  rangesHash: rangesFingerprint({ ranges: RANGES, criticalLow: 7, criticalHigh: 20 }),
+};
+
+check("فحص معتمد بلا تعديل", isRangesApproved(approvedTest), true);
+check("حالته APPROVED", approvalState(approvedTest), "APPROVED");
+check("بلا اعتماد أصلًا", approvalState({ ranges: RANGES }), "NEVER");
+check("فحص معدوم غير معتمد", isRangesApproved(null), false);
+// تغيير مدى بعد الاعتماد
+check(
+  "تعديل مدى يُسقط الاعتماد",
+  approvalState({ ...approvedTest, ranges: [{ sex: "MALE", low: 10, high: 17 }, RANGES[1]] }),
+  "STALE"
+);
+// تغيير حدّ حرج وحده — أخطر من المدى وأسهل نسيانًا
+check(
+  "تعديل حدّ حرج يُسقط الاعتماد",
+  approvalState({ ...approvedTest, criticalLow: 5 }),
+  "STALE"
+);
+check(
+  "حذف مدى يُسقط الاعتماد",
+  approvalState({ ...approvedTest, ranges: [RANGES[0]] }),
+  "STALE"
+);
+// إعادة الترتيب لا تغيّر المعنى السريري، فلا يجوز أن تُسقط اعتمادًا صحيحًا.
+check(
+  "إعادة ترتيب المديات لا تُسقط الاعتماد",
+  approvalState({ ...approvedTest, ranges: [RANGES[1], RANGES[0]] }),
+  "APPROVED"
+);
+check(
+  "بصمتان مختلفتان لمديين مختلفين",
+  rangesFingerprint({ ranges: [{ low: 1, high: 2 }] }) ===
+    rangesFingerprint({ ranges: [{ low: 1, high: 3 }] }),
+  false
+);
+
+/* ── ١٢. النتائج النصّية: النفي لا يُقرأ إثباتًا ──────────────────
+   المطابقة الجزئية كانت تجعل «غير طبيعي» تحوي «طبيعي» فتُعلَّم NORMAL —
+   مزرعة بول موجبة تخرج في تقرير المريض «طبيعية». هذا العيب الوحيد الذي
+   كان يُنتج نتيجة مريض خاطئة في الاستعمال العادي بلا أي خطأ خادم.  */
+group("النتائج النصّية — النفي لا يُقرأ إثباتًا");
+
+check("سلبي = طبيعي", computeTextFlag("سلبي"), "NORMAL");
+check("طبيعي = طبيعي", computeTextFlag("طبيعي"), "NORMAL");
+check("negative = طبيعي", computeTextFlag("Negative"), "NORMAL");
+check("لا يوجد نمو بكتيري = طبيعي", computeTextFlag("لا يوجد نمو بكتيري"), "NORMAL");
+// جوهر العيب: النفي يحوي المُثبَت نصًّا.
+check("«غير طبيعي» ليست طبيعية", computeTextFlag("غير طبيعي"), "ABNORMAL");
+check("«abnormal» ليست normal", computeTextFlag("Abnormal"), "ABNORMAL");
+check("«غير سلبي» ليست سلبية", computeTextFlag("غير سلبي"), "ABNORMAL");
+// نفي عرضيّ داخل نتيجة خطيرة — أخبث الحالات.
+check(
+  "نمو كثيف مع «لا يوجد حساسية» = غير طبيعي",
+  computeTextFlag("نمو بكتيري كثيف، لا يوجد حساسية للسيفترياكسون"),
+  "ABNORMAL"
+);
+check("إيجابي = غير طبيعي", computeTextFlag("إيجابي"), "ABNORMAL");
+check("نصّ فارغ بلا عَلَم", computeTextFlag("   "), null);
+check("قيمة معدومة بلا عَلَم", computeTextFlag(null), null);
+// التطبيع: الهمزات والتشكيل والترقيم لا تقلب النتيجة.
+check("«سَلبي.» بتشكيل وترقيم", computeTextFlag("سَلبي."), "NORMAL");
+check("«لا يوجد» بمسافات زائدة", computeTextFlag("  لا   يوجد  "), "NORMAL");
+
+/* ── ١٣. العمر: حدّ الطفولة والبلوغ ──────────────────────────────
+   العمر يختار المدى المرجعي ويُجمَّد في التقرير. القسمة على ٣٦٥٫٢٥ كانت
+   تُنقص العمر بنحو يوم في السنة، فيقع من بلغ الخامسة عشرة تحت عتبة
+   `ageMaxYears: 15` فيأخذ مدى الأطفال — ونحو ثلث تواريخ الميلاد تصاب. */
+group("العمر — حدّ الطفولة والبلوغ");
+
+const at = (y: number, m: number, d: number) => new Date(y, m - 1, d);
+
+check("يوم الميلاد الخامس عشر = ١٥ لا ١٤", Math.floor(ageInYears("2011-03-14", at(2026, 3, 14))!), 15);
+check("قبل يوم الميلاد بيوم = ١٤", Math.floor(ageInYears("2011-03-14", at(2026, 3, 13))!), 14);
+check("بعد يوم الميلاد بيوم = ١٥", Math.floor(ageInYears("2011-03-14", at(2026, 3, 15))!), 15);
+// السنوات الكبيسة هي ما كان يزحف بالحساب القديم.
+check("مولود ٢٩ فبراير في سنة غير كبيسة", Math.floor(ageInYears("2008-02-29", at(2026, 3, 1))!), 18);
+check("يوم الميلاد الأول", Math.floor(ageInYears("2025-07-29", at(2026, 7, 29))!), 1);
+check("قبل السنة الأولى بيوم", ageInYears("2025-07-29", at(2026, 7, 28))! < 1, true);
+// تاريخ ميلاد مستقبلي = خطأ إدخال، لا عمر سالب يختار مدًى عشوائيًّا.
+check("تاريخ مستقبلي = بلا عمر", ageInYears("2030-01-01", at(2026, 7, 29)), null);
+check("تاريخ تالف = بلا عمر", ageInYears("ليس تاريخًا", at(2026, 7, 29)), null);
+check("بلا تاريخ = بلا عمر", ageInYears(null), null);
+check("تسمية عمر مجهول", ageLabel(null), "—");
+check("تسمية مولود بأيام", ageLabel("2026-07-20", at(2026, 7, 29)), "أقل من شهر");
+check("تسمية ستة أشهر", ageLabel("2026-01-29", at(2026, 7, 29)), "6 شهر");
+check("تسمية تاريخ مستقبلي", ageLabel("2030-01-01", at(2026, 7, 29)), "—");
+
+/* المدى المرجعي عند الحدّ بالضبط: HGB مدى الأطفال `ageMaxYears: 12`. */
+check(
+  "ابن ١٢ سنة بالضبط يأخذ مدى البالغين لا الأطفال",
+  pickRange(hgb, "MALE", ageInYears("2014-07-29", at(2026, 7, 29))),
+  { sex: "MALE", ageMinYears: 12, low: 13.5, high: 17.5 }
+);
+check(
+  "قبل الثانية عشرة بيوم يبقى على مدى الأطفال",
+  pickRange(hgb, "MALE", ageInYears("2014-07-29", at(2026, 7, 28))),
+  { ageMaxYears: 12, low: 11.5, high: 15.5 }
+);
+check("أشهر تقويمية لا كسر سنة", ageInMonths("2026-01-29", at(2026, 7, 29)), 6);
 
 /* ── النتيجة ───────────────────────────────────────────────── */
 console.log(

@@ -18,6 +18,7 @@ import {
   ageInYears,
   ageLabel,
   fmtMoney,
+  isRangesApproved,
   localDay,
   orderNet,
   pickRange,
@@ -160,6 +161,17 @@ function NewOrder() {
       if (errors?.length) throw new Error(errors[0].message);
       if (!order) throw new Error("لم يُنشأ الطلب");
 
+      /* سطر الإنشاء **فور** نجاح الإنشاء لا في نهاية الدالة: كان في
+         الآخر، فإذا فشلت الفحوصات رُميَ الخطأ قبله — فيبقى في النظام طلب
+         برقم مستهلَك وفحوصات يتيمة وسجل تدقيق خالٍ من إنشائه وإلغائه معًا. */
+      await audit({
+        entity: "Order",
+        entityId: order.id,
+        action: "ORDER_CREATED",
+        actor: session.actor,
+        summary: `طلب ${orderNo} للمريض ${patient.fullName}`,
+      });
+
       const age = ageInYears(patient.birthDate);
       const items = expand(picked);
 
@@ -184,30 +196,46 @@ function NewOrder() {
             refText: rangeLabel(r?.low, r?.high, r?.text),
             criticalLow: t.criticalLow,
             criticalHigh: t.criticalHigh,
+            // مجمَّدة كبقية أرقام المدى: تقرير طُبع بمدى غير معتمد يبقى
+            // معلومًا أنه كذلك مهما اعتُمد الفحص بعد ذلك.
+            refApproved: isRangesApproved(t),
             sortOrder: t.sortOrder,
           });
           if (itemErrors?.length) throw new Error(itemErrors[0].message);
         }
       } catch (itemErr) {
-        // لا معاملات (transactions) هنا: الطلب أُنشئ لكن فحوصاته ناقصة.
-        // نلغيه بدل تركه في قائمة العمل بفحوصات جزئية تُعتمد وتُطبع.
-        await client.models.Order.update({
-          id: order.id,
-          status: "CANCELLED",
-          cancelledAt: new Date().toISOString(),
-          cancelledBy: session.actor,
-          cancelReason: `فشل إنشاء فحوصات الطلب: ${(itemErr as Error).message}`,
-        });
+        /* لا معاملات (transactions) هنا: الطلب أُنشئ لكن فحوصاته ناقصة.
+           نلغيه بدل تركه في قائمة العمل بفحوصات جزئية تُعتمد وتُطبع.
+
+           وفشل الإلغاء نفسه كان يُبتلع صامتًا — فيبقى الطلب `REGISTERED`
+           بفحوصات جزئية، وهو بالضبط ما يقول هذا التعليق إنه يمنعه. الآن
+           يُفحص، ويُسجَّل في التدقيق، ويُعرض للموظف برقم الطلب. */
+        const reason = `فشل إنشاء فحوصات الطلب: ${(itemErr as Error).message}`;
+        try {
+          const { errors: cancelErrors } = await client.models.Order.update({
+            id: order.id,
+            status: "CANCELLED",
+            cancelledAt: new Date().toISOString(),
+            cancelledBy: session.actor,
+            cancelReason: reason,
+          });
+          if (cancelErrors?.length) throw new Error(cancelErrors[0].message);
+          await audit({
+            entity: "Order",
+            entityId: order.id,
+            action: "ORDER_CANCELLED",
+            actor: session.actor,
+            summary: `إلغاء تلقائي للطلب ${orderNo}: ${reason}`,
+          });
+        } catch (cancelErr) {
+          throw new Error(
+            `${reason}\n\n⚠️ وتعذّر إلغاء الطلب ${orderNo} تلقائيًّا ` +
+              `(${(cancelErr as Error).message}). افتحه من قائمة العمل وألغِه يدويًّا — ` +
+              "فحوصاته ناقصة ولا يصلح للاعتماد."
+          );
+        }
         throw itemErr;
       }
-
-      await audit({
-        entity: "Order",
-        entityId: order.id,
-        action: "ORDER_CREATED",
-        actor: session.actor,
-        summary: `طلب ${orderNo} — ${items.length} فحص للمريض ${patient.fullName}`,
-      });
 
       /* الدفعة الأولى سطر في السجل كأي دفعة أخرى. فشلها لا يُلغي الطلب —
          الطلب صحيح والفحوصات قائمة، الناقص تسجيل مال. ننقل الموظف إلى

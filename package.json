@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "tsx lib/lab.test.ts"
+    "test": "tsx lib/lab.test.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.amplify.json",
+    "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "@aws-amplify/ui-react": "^6.5.5",

@@ -51,6 +51,11 @@ export const CURRENCY_PRESETS: { code: string; symbol: string; label: string }[]
 
 export type LabConfigFields = {
   labName: string;
+  /* ترويسة التقرير المطبوع — بيانات المختبر الحقيقية لا قيم في الكود.
+     الفارغ منها لا يُطبع: سطر خالٍ أسلم من رقم ترخيص مُختلَق. */
+  labNameEn: string;
+  licenseNo: string;
+  contact: string;
   currency: string;
   currencyCode: string;
   sampleTypes: string[];
@@ -67,6 +72,11 @@ export type LabConfigValue = LabConfigFields & {
 
 const FALLBACK: LabConfigFields = {
   labName: "مختبر النور الطبي",
+  // فارغة عمدًا: لا اسم إنجليزي ولا ترخيص ولا عنوان يُخترع لمختبر
+  // لم يُدخل بياناته. ما يُطبع على وثيقة طبية يجب أن يكون صحيحًا أو غائبًا.
+  labNameEn: "",
+  licenseNo: "",
+  contact: "",
   currency: DEFAULT_CURRENCY,
   currencyCode: "SAR",
   sampleTypes: DEFAULT_SAMPLE_TYPES,
@@ -109,6 +119,9 @@ export function LabConfigProvider({ children }: { children: React.ReactNode }) {
         setRecordId(row.id);
         apply({
           labName: row.labName || FALLBACK.labName,
+          labNameEn: row.labNameEn ?? "",
+          licenseNo: row.licenseNo ?? "",
+          contact: row.contact ?? "",
           currency: row.currency || FALLBACK.currency,
           currencyCode: row.currencyCode || FALLBACK.currencyCode,
           sampleTypes: clean(row.sampleTypes) ?? FALLBACK.sampleTypes,
@@ -133,6 +146,9 @@ export function LabConfigProvider({ children }: { children: React.ReactNode }) {
       const payload = {
         key: MAIN_KEY,
         labName: next.labName,
+        labNameEn: next.labNameEn,
+        licenseNo: next.licenseNo,
+        contact: next.contact,
         currency: next.currency,
         currencyCode: next.currencyCode,
         sampleTypes: next.sampleTypes,

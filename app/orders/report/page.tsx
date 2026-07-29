@@ -21,12 +21,13 @@ type Order = Schema["Order"]["type"];
 type Patient = Schema["Patient"]["type"];
 type Item = Schema["OrderItem"]["type"];
 
-const LAB = {
-  name: "مختبر النور الطبي",
-  subtitle: "Al-Noor Medical Laboratory",
-  license: "ترخيص وزارة الصحة رقم 1234/م",
-  contact: "الرياض — هاتف 0112345678",
-};
+/* اسم احتياطي وحده — ولا ترخيص ولا عنوان ولا اسم إنجليزي.
+   كانت هنا قيم مُختلَقة تُطبع على كل تقرير: «ترخيص وزارة الصحة رقم
+   1234/م» و«الرياض — هاتف 0112345678». رقم ترخيص مُختلَق لجهة تنظيمية
+   على وثيقة طبية‑قانونية خطر قانوني على المختبر، ولم يكن ثمّة سبيل
+   لضبطه ولا لإخفائه. الآن تأتي كلها من إعدادات المختبر، والفارغ منها
+   لا يُطبع: سطر غائب أصدق من بيان مخترَع. */
+const FALLBACK_LAB_NAME = "مختبر النور الطبي";
 
 export default function Page() {
   return (
@@ -38,7 +39,7 @@ export default function Page() {
 
 function ReportPage() {
   // اسم المختبر من الإعدادات — الترويسة الثابتة أدناه احتياط قبل ضبطها.
-  const { labName } = useLabConfig();
+  const { labName, labNameEn, licenseNo, contact } = useLabConfig();
   const params = useSearchParams();
   const orderId = params.get("id") ?? "";
   /* مسار المريض: رقم الطلب + الرقم المُتحقِّق في العنوان بدل معرّف
@@ -120,6 +121,14 @@ function ReportPage() {
   const isCancelled = order.status === "CANCELLED";
   const revision = order.reportRevision ?? 1;
 
+  /* حالة الاعتماد مجمَّدة في `OrderItem` وقت الطلب لا مقروءة من الكتالوج
+     الآن: تقرير طُبع بمدى غير معتمد يبقى معلومًا أنه كذلك مهما اعتُمد
+     الفحص بعده. والطلبات الأقدم من هذا الحقل تحمل `null` لا `false`،
+     فلا تُتّهم زورًا — النقص فيها يعالجه الكتالوج لا التقرير. */
+  const unapprovedTests = items
+    .filter((i) => i.refApproved === false)
+    .map((i) => i.testNameAr);
+
   /* رمز التحقق يُشتقّ من محتوى التقرير نفسه، فأي تغيير في قيمة نتيجة
      أو في رقم المراجعة يغيّر الرمز. يقارَن الرمز المطبوع بما يعرضه
      النظام عند الاستفسار عن صحّة تقرير. (كاشف تلاعب لا توقيع رقمي.) */
@@ -161,9 +170,10 @@ function ReportPage() {
       <div className="report">
         <div className="report-head">
           <div>
-            <h1>{labName || LAB.name}</h1>
-            <div className="muted small">{LAB.subtitle}</div>
-            <div className="muted small">{LAB.license}</div>
+            <h1>{labName || FALLBACK_LAB_NAME}</h1>
+            {labNameEn && <div className="muted small">{labNameEn}</div>}
+            {licenseNo && <div className="muted small">{licenseNo}</div>}
+            {contact && <div className="muted small">{contact}</div>}
           </div>
           <div style={{ textAlign: "left" }}>
             <div style={{ fontWeight: 800, fontSize: "1.05rem" }}>
@@ -171,7 +181,6 @@ function ReportPage() {
               {revision > 1 && ` — مراجعة ${revision}`}
             </div>
             <div className="mono small">{order.orderNo}</div>
-            <div className="muted small">{LAB.contact}</div>
           </div>
         </div>
 
@@ -229,6 +238,30 @@ function ReportPage() {
           </div>
         )}
 
+        {/* التنبيه على الورقة نفسها لا في الشاشة وحدها: التقرير المطبوع
+            يخرج من المختبر إلى يد طبيب يقرأ «طبيعي» و«حرج» ويبني عليهما
+            قرارًا. إن لم يراجع مسؤول الجودة تلك المديات فعليه أن يعرف.  */}
+        {unapprovedTests.length > 0 && (
+          <div
+            style={{
+              border: "2px solid #b45309",
+              background: "#fef3c7",
+              color: "#92400e",
+              padding: "8px 12px",
+              borderRadius: 8,
+              marginBottom: 16,
+              fontWeight: 700,
+              textAlign: "center",
+            }}
+          >
+            مديات مرجعية غير معتمدة من مسؤول الجودة في {unapprovedTests.length} فحص
+            <div style={{ fontWeight: 400, marginTop: 4 }}>
+              {unapprovedTests.join(" · ")} — تُفسَّر نتائجها بحذر وبالرجوع إلى
+              الطبيب المعالج.
+            </div>
+          </div>
+        )}
+
         <div className="report-meta">
           <div>
             <div className="k">اسم المريض</div>
@@ -250,7 +283,10 @@ function ReportPage() {
           </div>
           <div>
             <div className="k">تاريخ سحب العيّنة</div>
-            <div>{fmtDateTime(order.collectedAt ?? order.createdAt)}</div>
+            {/* «—» لا `createdAt`: الاستبدال الصامت كان يطبع وقت تسجيل
+                الطلب تحت عنوان «تاريخ سحب العيّنة» — بيان زمني خاطئ على
+                وثيقة تُسلَّم للمريض ويُبنى عليه تفسير فحوص حسّاسة للوقت. */}
+            <div>{order.collectedAt ? fmtDateTime(order.collectedAt) : "—"}</div>
           </div>
           <div>
             <div className="k">تاريخ إصدار التقرير</div>

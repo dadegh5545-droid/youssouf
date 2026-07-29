@@ -1,7 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { audit, client, listAll, useSession } from "@/lib/amplify";
+import {
+  addPayment,
+  audit,
+  client,
+  listAll,
+  listPayments,
+  useSession,
+} from "@/lib/amplify";
 import {
   CURRENCY_PRESETS,
   DEFAULT_SAMPLE_TYPES,
@@ -23,6 +30,9 @@ export default function SettingsPage() {
   const canManage = session.can("manageCatalog");
 
   const [labName, setLabName] = useState(cfg.labName);
+  const [labNameEn, setLabNameEn] = useState(cfg.labNameEn);
+  const [licenseNo, setLicenseNo] = useState(cfg.licenseNo);
+  const [contact, setContact] = useState(cfg.contact);
   const [currency, setCurrency] = useState(cfg.currency);
   const [currencyCode, setCurrencyCode] = useState(cfg.currencyCode);
   const [samples, setSamples] = useState<string[]>(cfg.sampleTypes);
@@ -34,11 +44,24 @@ export default function SettingsPage() {
   useEffect(() => {
     if (cfg.loading) return;
     setLabName(cfg.labName);
+    setLabNameEn(cfg.labNameEn);
+    setLicenseNo(cfg.licenseNo);
+    setContact(cfg.contact);
     setCurrency(cfg.currency);
     setCurrencyCode(cfg.currencyCode);
     setSamples(cfg.sampleTypes);
     setTubes(cfg.tubeTypes);
-  }, [cfg.loading, cfg.labName, cfg.currency, cfg.currencyCode, cfg.sampleTypes, cfg.tubeTypes]);
+  }, [
+    cfg.loading,
+    cfg.labName,
+    cfg.labNameEn,
+    cfg.licenseNo,
+    cfg.contact,
+    cfg.currency,
+    cfg.currencyCode,
+    cfg.sampleTypes,
+    cfg.tubeTypes,
+  ]);
 
   async function save() {
     setBusy(true);
@@ -46,6 +69,9 @@ export default function SettingsPage() {
     try {
       await cfg.save({
         labName: labName.trim(),
+        labNameEn: labNameEn.trim(),
+        licenseNo: licenseNo.trim(),
+        contact: contact.trim(),
         currency: currency.trim(),
         currencyCode: currencyCode.trim().toUpperCase(),
         sampleTypes: samples,
@@ -99,6 +125,42 @@ export default function SettingsPage() {
               placeholder="مختبر النور الطبي"
             />
             <div className="hint">يظهر في ترويسة التقارير.</div>
+          </div>
+
+          <div className="field">
+            <label>الاسم بالإنجليزية</label>
+            <input
+              value={labNameEn}
+              onChange={(e) => setLabNameEn(e.target.value)}
+              disabled={!canManage}
+              placeholder="Al-Noor Medical Laboratory"
+            />
+          </div>
+
+          <div className="field">
+            <label>رقم الترخيص</label>
+            <input
+              value={licenseNo}
+              onChange={(e) => setLicenseNo(e.target.value)}
+              disabled={!canManage}
+              placeholder="ترخيص وزارة الصحة رقم …"
+            />
+            <div className="hint">
+              <strong>اكتب رقم ترخيصك الحقيقي أو اترك الحقل فارغًا.</strong> يُطبع
+              على كل تقرير مختبري — وهو وثيقة طبية‑قانونية، فرقم غير صحيح عليها
+              خطر على المختبر. الحقل الفارغ لا يُطبع أصلًا.
+            </div>
+          </div>
+
+          <div className="field">
+            <label>العنوان والهاتف</label>
+            <input
+              value={contact}
+              onChange={(e) => setContact(e.target.value)}
+              disabled={!canManage}
+              placeholder="المدينة — هاتف …"
+            />
+            <div className="hint">يظهر في ترويسة التقارير، ويُخفى إن تُرك فارغًا.</div>
           </div>
 
           <div className="field">
@@ -182,7 +244,152 @@ export default function SettingsPage() {
       </div>
 
       {canManage && <DayBackfill />}
+      {canManage && <PaymentMigration />}
     </>
+  );
+}
+
+type PayableOrder = {
+  id: string;
+  orderNo: string;
+  paidAmount: number | null;
+  createdAt: string;
+};
+
+/**
+ * ترحيل الدفعات القديمة إلى سجل `Payment`.
+ *
+ * الطلبات المنشأة قبل جدول الدفعات تحمل `paidAmount` بلا أي سطر يفسّره.
+ * صفحة الطلب تعرض المبلغ ولا تسمح بتفصيله ولا بإبطاله، وتقرير التحصيل
+ * لا يراه أصلًا لأنه يقرأ السطور بيوم القبض.
+ *
+ * الترحيل ينشئ سطرًا واحدًا لكل طلب كهذا بالمبلغ نفسه، موسومًا «ترحيل
+ * رصيد سابق» وبطريقة «أخرى» — لأن طريقة الدفع الأصلية غير معروفة، ولا
+ * يجوز اختراعها في تقرير يطابقه المحاسب بصندوقه.
+ *
+ * يوم السطر هو يوم إنشاء الطلب لا يوم الترحيل: وضعه في يوم الترحيل كان
+ * يُظهر إيراد سنة كاملة في تحصيل يوم واحد.
+ */
+function PaymentMigration() {
+  const session = useSession();
+  const [scan, setScan] = useState<{ total: number; pending: PayableOrder[] } | null>(
+    null
+  );
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [progress, setProgress] = useState(0);
+
+  async function check() {
+    setBusy(true);
+    setMsg("");
+    try {
+      const all = await listAll<PayableOrder>((nextToken) =>
+        client.models.Order.list({
+          limit: 500,
+          nextToken,
+          selectionSet: ["id", "orderNo", "paidAmount", "createdAt"],
+        })
+      );
+      const withMoney = all.filter((o) => (o.paidAmount ?? 0) > 0.005);
+
+      // استعلام سطور لكل طلب عليه مال — الطلبات بلا مال لا تحتاج فحصًا.
+      const pending: PayableOrder[] = [];
+      for (const o of withMoney) {
+        const rows = await listPayments(o.id);
+        if (rows.length === 0) pending.push(o);
+      }
+      setScan({ total: withMoney.length, pending });
+    } catch (e) {
+      setMsg(`تعذّر الفحص: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function run() {
+    if (!scan?.pending.length) return;
+    setBusy(true);
+    setMsg("");
+    setProgress(0);
+    let done = 0;
+    let at = "";
+    try {
+      for (const o of scan.pending) {
+        at = o.orderNo;
+        /* إعادة فحص السطور قبل الكتابة: بين الفحص والتشغيل قد يكون
+           موظف سجّل دفعة على الطلب نفسه، وترحيلٌ فوقها يُقيّد المال مرتين. */
+        const existing = await listPayments(o.id);
+        if (existing.length > 0) continue;
+
+        await addPayment({
+          orderId: o.id,
+          orderNo: o.orderNo,
+          amount: o.paidAmount ?? 0,
+          method: "OTHER",
+          actor: session.actor,
+          note: "ترحيل رصيد سابق — سُجّل قبل إنشاء سجل الدفعات",
+          // يوم إنشاء الطلب لا يوم الترحيل.
+          at: o.createdAt,
+        });
+        done++;
+        setProgress(done);
+      }
+
+      await audit({
+        entity: "Order",
+        entityId: "MIGRATION",
+        action: "PAYMENTS_MIGRATED",
+        actor: session.actor,
+        summary: `ترحيل ${done} رصيدًا سابقًا إلى سجل الدفعات`,
+      });
+
+      setMsg(`اكتمل: رُحِّل ${done} رصيدًا. صارت هذه المبالغ قابلة للتفصيل والإبطال.`);
+      await check();
+    } catch (e) {
+      setMsg(
+        `توقّف بعد ${done} طلب عند ${at}: ${(e as Error).message} — ما رُحِّل محفوظ، أعد التشغيل للباقي.`
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <div className="card-head">
+        <h2>ترحيل الدفعات القديمة</h2>
+        <button className="btn sm" onClick={check} disabled={busy}>
+          {busy && !scan ? "جارٍ الفحص…" : "فحص الأرصدة"}
+        </button>
+      </div>
+
+      <p className="muted small" style={{ marginTop: 0 }}>
+        الطلبات المنشأة قبل سجل الدفعات تحمل مبلغًا مقبوضًا بلا سطر يفسّره: لا
+        تفصيل له ولا إمكان إبطال، ولا يظهر في تقرير التحصيل. الترحيل ينشئ سطرًا
+        واحدًا لكل طلب بالمبلغ نفسه في <strong>يوم إنشاء الطلب</strong>، بطريقة
+        «أخرى» لأن الطريقة الأصلية غير معروفة ولا تُخترع.
+      </p>
+
+      {msg && <div className="alert">{msg}</div>}
+
+      {scan && (
+        <div className="row" style={{ alignItems: "center" }}>
+          <span className="badge info">{scan.total} طلب عليه مبلغ مقبوض</span>
+          {scan.pending.length === 0 ? (
+            <span className="badge ok">كلّها لها سطور — لا حاجة لشيء</span>
+          ) : (
+            <>
+              <span className="badge warn">{scan.pending.length} رصيدًا بلا سطور</span>
+              <button className="btn primary" onClick={run} disabled={busy}>
+                {busy
+                  ? `جارٍ الترحيل… ${progress}/${scan.pending.length}`
+                  : "تشغيل الترحيل"}
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

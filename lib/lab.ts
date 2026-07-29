@@ -24,18 +24,70 @@ export type Range = {
 
 /* ── العمر ─────────────────────────────────────────────────── */
 
-export function ageInYears(birthDate?: string | null): number | null {
+/**
+ * العمر بالسنوات.
+ *
+ * بفروق التقويم لا بالقسمة على ٣٦٥٫٢٥: القسمة كانت تعطي عمرًا أقلّ من
+ * الحقيقي بنحو يوم في السنة (سنوات كبيسة)، فيقع من بلغ الخامسة عشرة
+ * تحت عتبة `ageMaxYears: 15` في يوم ميلاده وما بعده بأيام، فيُختار له
+ * **مدى الأطفال** ويُجمَّد في تقريره: كرياتينين ٠٫٩ لذكر في الخامسة
+ * عشرة يُعلَّم «مرتفعًا» وهو طبيعي. أصاب هذا نحو ثلث تواريخ الميلاد عند
+ * الحدّ.
+ *
+ * @param now يُحقن في الاختبارات كي تكون النتيجة ثابتة لا تعتمد على
+ *   لحظة التشغيل — بلا ذلك لا يمكن اختبار حدود الأعمار أصلًا.
+ */
+export function ageInYears(
+  birthDate?: string | null,
+  now: Date = new Date()
+): number | null {
   if (!birthDate) return null;
   const b = new Date(birthDate);
-  if (Number.isNaN(b.getTime())) return null;
-  const diff = Date.now() - b.getTime();
-  return diff / (365.25 * 24 * 60 * 60 * 1000);
+  if (Number.isNaN(b.getTime()) || Number.isNaN(now.getTime())) return null;
+
+  let years = now.getFullYear() - b.getFullYear();
+  const monthDiff = now.getMonth() - b.getMonth();
+  const dayDiff = now.getDate() - b.getDate();
+  // لم يحلّ يوم الميلاد بعد هذا العام.
+  if (monthDiff < 0 || (monthDiff === 0 && dayDiff < 0)) years -= 1;
+
+  // تاريخ ميلاد مستقبلي = خطأ إدخال. `null` تجعل `pickRange` يتجاهل
+  // العمر بدل أن يختار مدًى بعمر سالب، وتُظهر «—» للفنّي بدل «1 شهر».
+  if (years < 0) return null;
+
+  // الكسر داخل السنة الجارية — يلزم للمديات دون السنة (حديثو الولادة).
+  const lastBirthday = new Date(b);
+  lastBirthday.setFullYear(b.getFullYear() + years);
+  const nextBirthday = new Date(b);
+  nextBirthday.setFullYear(b.getFullYear() + years + 1);
+  const span = nextBirthday.getTime() - lastBirthday.getTime();
+  const into = now.getTime() - lastBirthday.getTime();
+  return years + (span > 0 ? Math.max(0, Math.min(1, into / span)) : 0);
 }
 
-export function ageLabel(birthDate?: string | null): string {
-  const y = ageInYears(birthDate);
+/** عمر الرضيع بالأشهر التقويمية الكاملة — لا بكسر السنة. */
+export function ageInMonths(
+  birthDate?: string | null,
+  now: Date = new Date()
+): number | null {
+  if (ageInYears(birthDate, now) === null) return null;
+  const b = new Date(birthDate as string);
+  let months = (now.getFullYear() - b.getFullYear()) * 12 + (now.getMonth() - b.getMonth());
+  if (now.getDate() < b.getDate()) months -= 1;
+  return Math.max(0, months);
+}
+
+export function ageLabel(birthDate?: string | null, now: Date = new Date()): string {
+  const y = ageInYears(birthDate, now);
   if (y === null) return "—";
-  if (y < 1) return `${Math.max(1, Math.round(y * 12))} شهر`;
+  if (y < 1) {
+    /* بالأشهر التقويمية لا بـ`y * 12`: الكسر يُحسب على طول السنة، وستة
+       أشهر تبدأ بشهور قصيرة (يناير–يوليو) تعطي ٥٫٩٥ فتُعرض «٥ شهر».
+       فرق شهر في عمر رضيع يقلب المدى المرجعي. */
+    const months = ageInMonths(birthDate, now) ?? 0;
+    // «أقل من شهر» أصدق من «١ شهر» لمولود عمره أيام.
+    return months <= 0 ? "أقل من شهر" : `${months} شهر`;
+  }
   return `${Math.floor(y)} سنة`;
 }
 
@@ -109,15 +161,52 @@ export function computeFlag(opts: {
   return "NORMAL";
 }
 
-/** نتيجة نصية/اختيارية: أي شيء غير "سلبي/طبيعي" يُعلَّم كغير طبيعي. */
-const NORMAL_WORDS = ["سلبي", "طبيعي", "لا يوجد", "negative", "normal"];
+/* نتيجة نصية/اختيارية: أي شيء غير "سلبي/طبيعي" يُعلَّم كغير طبيعي.
+
+   ⚠️ المطابقة **كاملة لا جزئية**. كانت `v.includes(w)` فكانت «غير طبيعي»
+   تحوي «طبيعي» و«abnormal» تحوي «normal» فتُعلَّم كلتاهما NORMAL —
+   مزرعة بول موجبة تخرج في تقرير المريض «طبيعية». وأخبث منهما نصّ يحوي
+   نفيًا عرضيًّا مثل «نمو بكتيري كثيف، لا يوجد حساسية للسيفترياكسون»:
+   يحوي «لا يوجد» فيُعلَّم طبيعيًّا وهو من أشدّ النتائج خطورة.
+
+   ولأن الفنّي يكتب نصًّا حرًّا، المطابقة الكاملة وحدها لا تكفي: نطبّع
+   المسافات وعلامات الترقيم أولًا، وأي نصّ لا يطابق قائمة الطبيعي
+   بالكامل يُعلَّم ABNORMAL — الميل إلى «غير طبيعي» مقصود، فمراجعة
+   نتيجة سليمة كلفتها دقيقة، وتمرير نتيجة مرضية كلفتها مريض.        */
+const NORMAL_PHRASES = [
+  "سلبي",
+  "طبيعي",
+  "لا يوجد",
+  "لا يوجد نمو",
+  "لا يوجد نمو بكتيري",
+  "غير مصاب",
+  "negative",
+  "normal",
+  "nil",
+  "none",
+  "no growth",
+  "not detected",
+];
+
+/** توحيد النصّ قبل المقارنة: مسافات وترقيم وتشكيل ومحارف عربية متغيّرة. */
+function normalizeResultText(v: string): string {
+  return v
+    .trim()
+    .toLowerCase()
+    .replace(/[ً-ْ]/g, "") // تشكيل
+    .replace(/[أإآ]/g, "ا")
+    .replace(/ى/g, "ي")
+    .replace(/ة/g, "ه")
+    .replace(/[.,،؛;:!?"'()\[\]-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const NORMAL_SET = new Set(NORMAL_PHRASES.map(normalizeResultText));
 
 export function computeTextFlag(value?: string | null): Flag | null {
   if (!value || !value.trim()) return null;
-  const v = value.trim().toLowerCase();
-  return NORMAL_WORDS.some((w) => v.includes(w.toLowerCase()))
-    ? "NORMAL"
-    : "ABNORMAL";
+  return NORMAL_SET.has(normalizeResultText(value)) ? "NORMAL" : "ABNORMAL";
 }
 
 export const FLAG_META: Record<Flag, { label: string; short: string; tone: string }> = {
@@ -266,6 +355,67 @@ export function verificationCode(parts: (string | number | null | undefined)[]):
   const raw = h1.toString(36).padStart(7, "0") + h2.toString(36).padStart(7, "0");
   return raw.toUpperCase().slice(0, 10);
 }
+
+/* ── اعتماد المديات المرجعية ────────────────────────────────────
+   ISO 15189 يوجب أن يتحقّق المختبر من مدياته المرجعية وحدوده الحرجة وفق
+   أجهزته وكواشفه ومجتمع مرضاه. المديات التي تصل مع بذرة الكتالوج
+   تقريبيّة، وتعليم نتيجة «طبيعية» بمدى لم يراجعه أحد هو خطأ سريري
+   صامت — لا يظهر كعطل بل كطمأنة في غير موضعها.                    */
+
+/**
+ * بصمة الأرقام السريرية لفحص: المديات والحدّان الحرجان.
+ *
+ * تُحفظ وقت الاعتماد ليسقط الاعتماد تلقائيًا إن غُيّرت الأرقام بعده —
+ * وإلا صار الاعتماد ختمًا يُؤخذ مرة ثم تُبدَّل الأرقام تحته.
+ *
+ * ترتيب المديات لا يغيّر معناها السريري، فتُرتَّب نصوصها قبل البصم كي
+ * لا يُسقط إعادةُ ترتيبٍ اعتمادًا صحيحًا.
+ */
+export function rangesFingerprint(opts: {
+  ranges?: readonly (Range | null | undefined)[] | null;
+  criticalLow?: number | null;
+  criticalHigh?: number | null;
+}): string {
+  const rows = (opts.ranges ?? [])
+    .filter(Boolean)
+    .map((r) =>
+      [r!.sex ?? "", r!.ageMinYears ?? "", r!.ageMaxYears ?? "", r!.low ?? "", r!.high ?? "", r!.text ?? ""].join(",")
+    )
+    .sort();
+  return verificationCode([
+    ...rows,
+    `C:${opts.criticalLow ?? ""}`,
+    `C:${opts.criticalHigh ?? ""}`,
+  ]);
+}
+
+export type ApprovableTest = {
+  ranges?: readonly (Range | null | undefined)[] | null;
+  criticalLow?: number | null;
+  criticalHigh?: number | null;
+  rangesApprovedAt?: string | null;
+  rangesHash?: string | null;
+};
+
+/** هل مديات هذا الفحص معتمدة **وغير معدَّلة** بعد الاعتماد؟ */
+export function isRangesApproved(t?: ApprovableTest | null): boolean {
+  if (!t?.rangesApprovedAt) return false;
+  return t.rangesHash === rangesFingerprint(t);
+}
+
+/** سبب عدم الاعتماد — للعرض بجانب الفحص. */
+export function approvalState(
+  t?: ApprovableTest | null
+): "APPROVED" | "STALE" | "NEVER" {
+  if (!t?.rangesApprovedAt) return "NEVER";
+  return t.rangesHash === rangesFingerprint(t) ? "APPROVED" : "STALE";
+}
+
+export const APPROVAL_LABEL: Record<string, { label: string; tone: string }> = {
+  APPROVED: { label: "معتمد", tone: "ok" },
+  STALE: { label: "عُدِّل بعد الاعتماد", tone: "warn" },
+  NEVER: { label: "غير معتمد", tone: "warn" },
+};
 
 /* لغة عربية بأرقام لاتينية: `-u-nu-latn` يمنع الأرقام الهندية (١٢٣).
    السبب عملي لا جمالي — أرقام الطلبات والملفات والنتائج المخبرية كلها

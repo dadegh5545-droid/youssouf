@@ -16,6 +16,7 @@ import {
   audit,
   client,
   listAll,
+  must,
   syncPaidAmount,
   useSession,
   voidPayment,
@@ -75,6 +76,8 @@ function OrderPage() {
   const [patient, setPatient] = useState<Patient | null>(null);
   const [items, setItems] = useState<Item[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
+  /* طلب أقدم من جدول الدفعات: يحمل مبلغًا بلا سطور تفسّره. */
+  const [needsMigration, setNeedsMigration] = useState(false);
   const [draft, setDraft] = useState<Record<string, Draft>>({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -99,12 +102,19 @@ function OrderPage() {
       setLoading(false);
       return;
     }
+    /* التبديل إلى طلب آخر يبقي المكوّن حيًّا (نفس المسار، معامل مختلف).
+       بلا هذين السطرين كانت الترويسة تعرض رقم الطلب الجديد فوق فحوصات
+       الطلب السابق وحقول الإدخال فعّالة — وعند فشل الجلب تبقى كذلك بلا
+       حدّ زمني، ولافتة مطابقة الأنبوب قد صُفّرت للتوّ. مسار مباشر لنسبة
+       نتيجة إلى مريض خطأ. */
+    setLoading(true);
+    setItems([]);
+
     const { data: o } = await client.models.Order.get({ id: orderId });
     if (!o) {
       setLoading(false);
       return;
     }
-    setOrder(o);
     const [{ data: p }, its] = await Promise.all([
       client.models.Patient.get({ id: o.patientId }),
       // استعلام مفهرس على orderId. البديل السابق كان
@@ -117,6 +127,9 @@ function OrderPage() {
         )
       ),
     ]);
+    /* الحالات كلها في دفعة واحدة بعد اكتمال الجلب: الترتيب هنا يمنع أي
+       لحظة تكون فيها الترويسة لطلب والفحوصات لطلب آخر. */
+    setOrder(o);
     setPatient(p ?? null);
     const sorted = [...its].sort(
       (a, b) => (a.sortOrder ?? 100) - (b.sortOrder ?? 100)
@@ -175,6 +188,7 @@ function OrderPage() {
     if (!orderId || !canSeeMoney || cachedPaid === null) return;
     const synced = await syncPaidAmount(orderId, cachedPaid);
     setPayments(synced.payments);
+    setNeedsMigration(synced.needsMigration);
     if (synced.repaired) {
       setOrder((cur) => (cur && cur.id === orderId ? { ...cur, paidAmount: synced.paid } : cur));
     }
@@ -205,7 +219,30 @@ function OrderPage() {
     [draft]
   );
 
+  /** القيمة المخزَّنة فعلًا على الخادم — لا ما في الحقل. */
+  const storedValue = (i: Item) =>
+    i.valueNumeric != null ? String(i.valueNumeric) : i.valueText ?? "";
+
+  /* التقدّم من المسودّة (ما يراه الفنّي وهو يكتب)، والاعتماد من المخزَّن.
+     كان الاثنان من المسودّة، فيتفعّل زرّ «اعتماد النتائج» بقيم لم تُكتب
+     بعد: و`approve()` لا يكتب أي قيمة — يختم السطور ويرفع الحالة إلى
+     APPROVED ثم يعيد التحميل فتُمسح القيم من الشاشة بلا إنذار. النتيجة
+     تقرير معتمد وموقَّع بلا نتائج.
+
+     والأخبث: مسؤول جودة يصحّح قيمة ثم يضغط «اعتماد» بدل «حفظ» (الزرّان
+     متجاوران) فيُعتمد الطلب بالقيمة القديمة وتضيع التصحيحة صامتة —
+     وحارس «أربع أعين» لا يعترض لأن `enteredBy` ما زال فارغًا. */
   const filledCount = items.filter((i) => (draft[i.id]?.value ?? "").trim()).length;
+  const savedCount = items.filter((i) => storedValue(i).trim()).length;
+  const allSaved = items.length > 0 && savedCount === items.length;
+
+  /** مسودّة فيها تعديل لم يُحفظ. */
+  const dirty = items.some((i) => {
+    const d = draft[i.id];
+    if (!d) return false;
+    return d.value.trim() !== storedValue(i).trim() || d.comment !== (i.comment ?? "");
+  });
+
   const allFilled = items.length > 0 && filledCount === items.length;
   const criticals = items.filter((i) => isCritical(flagOf(i)));
 
@@ -213,7 +250,10 @@ function OrderPage() {
      المخبَّأة. من لا يملك رؤية المال لا يقرأ السجل أصلًا، فتبقى له
      النسخة — وهو لا يرى بطاقة الفاتورة على أي حال. */
   const net = orderNet(order?.totalPrice, order?.discount);
-  const paid = canSeeMoney ? sumPayments(payments) : order?.paidAmount ?? 0;
+  /* الطلب الذي يحتاج ترحيلًا يُقرأ من النسخة لا من السجل الفارغ: صفرٌ
+     هنا يعني مطالبة المريض بمبلغ دفعه فعلًا. */
+  const paid =
+    canSeeMoney && !needsMigration ? sumPayments(payments) : order?.paidAmount ?? 0;
   const due = orderDue(net, paid);
 
   const approved = order?.status === "APPROVED" || order?.status === "DELIVERED";
@@ -317,13 +357,15 @@ function OrderPage() {
 
       if (approved) {
         const rev = (order.reportRevision ?? 1) + 1;
-        await client.models.Order.update({
-          id: order.id,
-          reportRevision: rev,
-          amendedAt: now,
-          amendedBy: session.name || session.actor,
-          amendReason: reason,
-        });
+        await must(
+          client.models.Order.update({
+            id: order.id,
+            reportRevision: rev,
+            amendedAt: now,
+            amendedBy: session.name || session.actor,
+            amendReason: reason,
+          })
+        );
         await audit({
           entity: "Order",
           entityId: order.id,
@@ -334,7 +376,7 @@ function OrderPage() {
         setMsg(`حُفظت ${changed} نتيجة. صدرت مراجعة رقم ${rev} من التقرير.`);
       } else {
         const nextStatus = allFilled ? "PENDING_REVIEW" : "IN_PROGRESS";
-        await client.models.Order.update({ id: order.id, status: nextStatus });
+        await must(client.models.Order.update({ id: order.id, status: nextStatus }));
         setMsg(
           `حُفظت ${changed} نتيجة.${
             allFilled ? " الطلب الآن بانتظار الاعتماد." : ""
@@ -354,12 +396,16 @@ function OrderPage() {
     if (!order) return;
     setBusy(true);
     try {
-      await client.models.Order.update({
+      /* الحالة لا تُرجَع إلى `COLLECTED` إن كان العمل قد تقدّم: تسجيل
+         سحب متأخر يجب أن يثبّت الوقت لا أن يعيد الطلب إلى الوراء. */
+      const backwards = order.status !== "REGISTERED";
+      const { errors } = await client.models.Order.update({
         id: order.id,
-        status: "COLLECTED",
+        ...(backwards ? {} : { status: "COLLECTED" as const }),
         collectedAt: new Date().toISOString(),
         collectedBy: session.actor,
       });
+      if (errors?.length) throw new Error(errors[0].message);
       await audit({
         entity: "Order",
         entityId: order.id,
@@ -377,6 +423,21 @@ function OrderPage() {
 
   async function approve() {
     if (!order) return;
+
+    // حارسان قبل أي شيء: لا اعتماد فوق مسودّة غير محفوظة، ولا اعتماد
+    // لطلب سطوره ناقصة في المخزَّن مهما بدا مكتملًا على الشاشة.
+    if (dirty) {
+      setMsg(
+        "لديك تعديلات غير محفوظة. احفظ النتائج أولًا ثم اعتمد — الاعتماد لا يحفظ ما في الحقول."
+      );
+      return;
+    }
+    if (!allSaved) {
+      setMsg(
+        `${items.length - savedCount} فحصًا بلا نتيجة محفوظة. لا يُعتمد طلب ناقص.`
+      );
+      return;
+    }
 
     if (selfEntered.length > 0) {
       if (!isAdmin) {
@@ -407,18 +468,22 @@ function OrderPage() {
     try {
       const now = new Date().toISOString();
       for (const i of items) {
-        await client.models.OrderItem.update({
-          id: i.id,
-          verifiedBy: session.actor,
-          verifiedAt: now,
-        });
+        await must(
+          client.models.OrderItem.update({
+            id: i.id,
+            verifiedBy: session.actor,
+            verifiedAt: now,
+          })
+        );
       }
-      await client.models.Order.update({
-        id: order.id,
-        status: "APPROVED",
-        approvedAt: now,
-        approvedBy: session.name || session.actor,
-      });
+      await must(
+        client.models.Order.update({
+          id: order.id,
+          status: "APPROVED",
+          approvedAt: now,
+          approvedBy: session.name || session.actor,
+        })
+      );
       await audit({
         entity: "Order",
         entityId: order.id,
@@ -449,13 +514,15 @@ function OrderPage() {
     setBusy(true);
     try {
       const now = new Date().toISOString();
-      await client.models.Order.update({
-        id: order.id,
-        status: "DELIVERED",
-        deliveredAt: now,
-        deliveredBy: session.actor,
-        deliveredTo: who.trim() || null,
-      });
+      await must(
+        client.models.Order.update({
+          id: order.id,
+          status: "DELIVERED",
+          deliveredAt: now,
+          deliveredBy: session.actor,
+          deliveredTo: who.trim() || null,
+        })
+      );
       await audit({
         entity: "Order",
         entityId: order.id,
@@ -514,6 +581,19 @@ function OrderPage() {
         method,
         actor: session.actor,
       });
+
+      /* المال سُجّل لكن النسخة لم تُحدَّث: لا نعرض فشلًا ولا ندعو إلى
+         إعادة التسجيل — إعادتها تُقيّد المبلغ مرتين ولا يبطله إلا المدير.
+         نعيد قراءة السجل، فإن تعذّرت أيضًا نطلب تحديث الصفحة. */
+      if (!res.synced) {
+        setMsg(
+          `سُجّلت دفعة ${fmtMoney(amount)} — لكن تعذّر تحديث ملخّص الفاتورة. ` +
+            "المبلغ مقيَّد في سجل الدفعات؛ حدّث الصفحة ولا تسجّله ثانيةً."
+        );
+        await loadPayments().catch(() => {});
+        return;
+      }
+
       setPayments(res.payments);
       setOrder((cur) => (cur ? { ...cur, paidAmount: res.paid } : cur));
       await audit({
@@ -611,6 +691,22 @@ function OrderPage() {
 
   async function cancelOrder() {
     if (!order) return;
+
+    /* مال مقبوض على طلب يُلغى: القرار المالي يجب أن يُتَّخذ صراحةً هنا،
+       لا أن يُترك معلّقًا. كان الإلغاء يمرّ صامتًا ولا يذكر المبلغ في سطر
+       التدقيق، وزرّ إبطال الدفعة يختفي بعد الإلغاء — فيبقى المال مقبوضًا
+       بلا أثر ولا آلية تصحيح. */
+    if (paid > 0) {
+      const ok = window.confirm(
+        `على هذا الطلب مبلغ مقبوض: ${fmtMoney(paid)}.\n\n` +
+          "الإلغاء لا يُعيد المال ولا يبطل دفعاته تلقائيًّا. " +
+          "بعد الإلغاء يبقى سجل الدفعات ظاهرًا، ويستطيع مدير المختبر إبطال " +
+          "دفعة بسبب مكتوب إن رُدَّ المبلغ للمريض.\n\n" +
+          "هل تريد المتابعة؟"
+      );
+      if (!ok) return;
+    }
+
     const reason = window.prompt(
       `إلغاء الطلب ${order.orderNo}.\nاكتب السبب (عيّنة غير صالحة، طلب مكرّر، انسحاب المريض…):`
     );
@@ -622,19 +718,23 @@ function OrderPage() {
     setBusy(true);
     try {
       const now = new Date().toISOString();
-      await client.models.Order.update({
+      const { errors } = await client.models.Order.update({
         id: order.id,
         status: "CANCELLED",
         cancelledAt: now,
         cancelledBy: session.actor,
         cancelReason: reason.trim(),
       });
+      if (errors?.length) throw new Error(errors[0].message);
       await audit({
         entity: "Order",
         entityId: order.id,
         action: "ORDER_CANCELLED",
         actor: session.actor,
-        summary: `إلغاء الطلب ${order.orderNo}: ${reason.trim()}`,
+        // المبلغ في السطر نفسه: مراجعة الصندوق تبحث عن الملغى بمال.
+        summary:
+          `إلغاء الطلب ${order.orderNo}: ${reason.trim()}` +
+          (paid > 0 ? ` — عليه مبلغ مقبوض ${fmtMoney(paid)} لم يُبطَل` : ""),
       });
       setMsg("أُلغي الطلب.");
       await load();
@@ -652,12 +752,14 @@ function OrderPage() {
     if (!who) return;
     setBusy(true);
     try {
-      await client.models.OrderItem.update({
-        id: item.id,
-        criticalNotifiedTo: who,
-        criticalNotifiedAt: new Date().toISOString(),
-        criticalPending: null, // يخرج من فهرس التنبيهات المعلّقة
-      });
+      await must(
+        client.models.OrderItem.update({
+          id: item.id,
+          criticalNotifiedTo: who,
+          criticalNotifiedAt: new Date().toISOString(),
+          criticalPending: null, // يخرج من فهرس التنبيهات المعلّقة
+        })
+      );
       await audit({
         entity: "OrderItem",
         entityId: item.id,
@@ -764,11 +866,17 @@ function OrderPage() {
           </p>
         </div>
         <div className="row">
-          {order.status === "REGISTERED" && session.can("collectSample") && (
-            <button className="btn" onClick={markCollected} disabled={busy}>
-              تسجيل سحب العيّنة
-            </button>
-          )}
+          {/* الشرط على `collectedAt` لا على الحالة: كان مشروطًا بـ
+              `REGISTERED`، وحفظ أول نتيجة ينقل الحالة إلى `IN_PROGRESS`
+              فيختفي الزرّ نهائيًّا و`collectedAt` يبقى فارغًا — فلا حدث
+              سحب في سجل التدقيق، والتقرير يطبع تاريخ التسجيل تحت عنوان
+              «تاريخ سحب العيّنة». */}
+          {!order.collectedAt && !approved && !cancelled &&
+            session.can("collectSample") && (
+              <button className="btn" onClick={markCollected} disabled={busy}>
+                تسجيل سحب العيّنة
+              </button>
+            )}
           {canEnter && (
             <button className="btn primary" onClick={saveResults} disabled={busy}>
               {busy ? "جارٍ الحفظ…" : approved ? "حفظ تعديل معتمد" : "حفظ النتائج"}
@@ -776,10 +884,18 @@ function OrderPage() {
           )}
           {canApprove && !approved && (
             <button
-              className="btn primary"
+              /* لا `primary`: كان بجوار «حفظ النتائج» وكلاهما بارز، فيُضغط
+                 الاعتماد سهوًا مكان الحفظ. */
+              className="btn"
               onClick={approve}
-              disabled={busy || !allFilled}
-              title={!allFilled ? "أكمل إدخال جميع النتائج أولًا" : ""}
+              disabled={busy || !allSaved || dirty}
+              title={
+                dirty
+                  ? "احفظ التعديلات أولًا — الاعتماد لا يحفظ ما في الحقول"
+                  : !allSaved
+                  ? "أكمل إدخال جميع النتائج واحفظها أولًا"
+                  : ""
+              }
             >
               اعتماد النتائج
             </button>
@@ -822,6 +938,21 @@ function OrderPage() {
         <div className="alert danger">
           هذا الطلب ملغى — {order.cancelReason || "بلا سبب مسجّل"} · ألغاه{" "}
           {order.cancelledBy} في {fmtDateTime(order.cancelledAt)}
+          {paid > 0 && (
+            <div className="small" style={{ fontWeight: 400, marginTop: 6 }}>
+              ⚠️ عليه مبلغ مقبوض {fmtMoney(paid)} لم يُبطَل. إن رُدَّ للمريض
+              فأبطل دفعاته من السجل أدناه بسبب مكتوب.
+            </div>
+          )}
+        </div>
+      )}
+
+      {needsMigration && (
+        <div className="alert warn">
+          هذا الطلب أقدم من سجل الدفعات: يحمل مبلغًا مقبوضًا{" "}
+          <strong>{fmtMoney(order.paidAmount)}</strong> بلا سطور تفسّره. المبلغ
+          محفوظ ومعروض كما هو — لكن لا تفصيل له ولا إمكان إبطال حتى يُرحَّل.
+          استعمل «صيانة البيانات» في الإعدادات.
         </div>
       )}
 
@@ -880,12 +1011,14 @@ function OrderPage() {
       )}
 
       <div className="grid cols-4" style={{ marginBottom: 16 }}>
-        <div className="stat">
+        <div className={`stat${dirty ? " warn-accent" : ""}`}>
           <div className="label">التقدّم</div>
           <div className="value">
-            {filledCount}/{items.length}
+            {savedCount}/{items.length}
           </div>
-          <div className="sub">نتيجة مُدخلة</div>
+          <div className="sub">
+            {dirty ? "⚠️ تعديلات غير محفوظة" : "نتيجة محفوظة"}
+          </div>
         </div>
         <div className="stat">
           <div className="label">الطبيب المُحوِّل</div>
@@ -976,8 +1109,10 @@ function OrderPage() {
                           مُبطلة — {p.voidReason} · {p.voidedBy}
                         </span>
                       ) : (
-                        isAdmin &&
-                        !cancelled && (
+                        /* بلا شرط `!cancelled`: كان الزرّ يختفي بالضبط في
+                           الحالة التي يُحتاج فيها — طلب ملغى عليه مال
+                           مقبوض يجب أن يُبطَل قيده عند ردّه للمريض. */
+                        isAdmin && (
                           <button
                             className="btn sm ghost"
                             onClick={() => undoPayment(p)}
@@ -1138,7 +1273,16 @@ function OrderPage() {
                         )}
                       </td>
                       <td className="small nowrap">{item.unit || "—"}</td>
-                      <td className="small nowrap">{item.refText || "—"}</td>
+                      <td className="small nowrap">
+                        {item.refText || "—"}
+                        {/* الفنّي يرى العَلَم «طبيعي/حرج» بجوار هذا المدى
+                            ويثق به. إن لم يراجعه مسؤول الجودة فليعلم. */}
+                        {item.refApproved === false && (
+                          <div>
+                            <span className="badge warn">مدى غير معتمد</span>
+                          </div>
+                        )}
+                      </td>
                       <td>
                         {meta ? (
                           <span className={`badge ${meta.tone}`}>

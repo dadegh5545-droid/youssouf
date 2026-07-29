@@ -334,6 +334,20 @@ export function reserveMrn(generate: () => string): Promise<string> {
 
 export type Payment = Schema["Payment"]["type"];
 
+/* ── فحص أخطاء الطفرات ─────────────────────────────────────────
+   عميل Amplify v6 **لا يرمي** عند رفض الخادم: يعيد الأخطاء في
+   `res.errors` ويكمل التنفيذ. فطفرة بلا فحص تُتبَع برسالة «تمّ» فوق عملية
+   لم تقع — «أُلغي الطلب» والطلب قائم في قائمة العمل، و«سُجّل الإبلاغ»
+   بلا تسجيل، واعتماد يُكتب فوق سطور لم تُختم. `must` تجعل الفحص سطرًا
+   واحدًا فلا يُنسى.                                                */
+export async function must<T>(
+  op: Promise<{ data?: T | null; errors?: readonly { message: string }[] }>
+): Promise<T | null | undefined> {
+  const res = await op;
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  return res.data;
+}
+
 /** كل دفعات طلب، الأقدم أولًا. */
 export function listPayments(orderId: string): Promise<Payment[]> {
   return listAll<Payment>((nextToken) =>
@@ -353,18 +367,41 @@ export function listPayments(orderId: string): Promise<Payment[]> {
 export async function syncPaidAmount(
   orderId: string,
   cached: number | null
-): Promise<{ paid: number; payments: Payment[]; repaired: boolean }> {
+): Promise<{
+  paid: number;
+  payments: Payment[];
+  repaired: boolean;
+  /** نسخة تحمل مبلغًا بلا سطور تفسّره — طلب أقدم من جدول الدفعات. */
+  needsMigration: boolean;
+}> {
   const payments = await listPayments(orderId);
   const paid = sumPayments(payments);
+
+  /* الحارس الأهمّ في هذه الدالة: طلبات ما قبل جدول `Payment` تحمل
+     `paidAmount` بلا أي سطر يفسّره. الكتابة العمياء كانت تصفّر مبلغًا
+     مقبوضًا فعلًا **بلا سطر تدقيق وبلا رجعة** — ويُطالَب المريض بالدفع
+     مرتين. المبلغ بلا سطور ليس خطأ نسخة بل بيانات تحتاج ترحيلًا. */
+  const needsMigration = payments.length === 0 && (cached ?? 0) > 0.005;
+  if (needsMigration) {
+    return { paid: cached ?? 0, payments, repaired: false, needsMigration: true };
+  }
+
   const repaired = cached === null || Math.abs(paid - cached) > 0.005;
   if (repaired) {
     const { errors } = await client.models.Order.update({ id: orderId, paidAmount: paid });
     if (errors?.length) throw new Error(errors[0].message);
   }
-  return { paid, payments, repaired };
+  return { paid, payments, repaired, needsMigration: false };
 }
 
-/** تسجيل دفعة: سطر جديد ثم تحديث النسخة المخبَّأة. */
+/**
+ * تسجيل دفعة: سطر جديد ثم تحديث النسخة المخبَّأة.
+ *
+ * `synced: false` تعني أن **المال سُجّل** وتأخّرت النسخة وحدها. التمييز
+ * ضروري: خطأ واحد لا يفرّق بين «لم يُكتب» و«كُتب ولم تُحدَّث النسخة»
+ * كان يجعل الواجهة تدعو الموظف إلى تسجيل الدفعة ثانيةً — فيُقيَّد المبلغ
+ * مرتين، ولا يبطله إلا المدير.
+ */
 export async function addPayment(input: {
   orderId: string;
   orderNo: string;
@@ -372,8 +409,13 @@ export async function addPayment(input: {
   method: string;
   actor: string;
   note?: string;
-}): Promise<{ paid: number; payments: Payment[] }> {
-  const now = new Date();
+  /* وقت القبض الحقيقي — للترحيل وحده. الدفعة الجارية تُترك بلا تمرير
+     فتأخذ اللحظة الحالية. ترحيل رصيد قديم بيوم الترحيل كان يُظهر إيراد
+     سنة كاملة في تحصيل يوم واحد. */
+  at?: string;
+}): Promise<{ paid: number; payments: Payment[]; synced: boolean }> {
+  const when = input.at ? new Date(input.at) : new Date();
+  const now = Number.isNaN(when.getTime()) ? new Date() : when;
   const { data, errors } = await client.models.Payment.create({
     orderId: input.orderId,
     orderNo: input.orderNo,
@@ -389,8 +431,14 @@ export async function addPayment(input: {
   if (errors?.length) throw new Error(errors[0].message);
   if (!data) throw new Error("لم تُسجَّل الدفعة");
 
-  const { paid, payments } = await syncPaidAmount(input.orderId, null);
-  return { paid, payments };
+  // من هنا فصاعدًا المال مسجَّل. أي فشل لاحق يخصّ النسخة المخبَّأة وحدها،
+  // ولا يجوز أن يُقرأ على أنه فشل في تسجيل الدفعة.
+  try {
+    const { paid, payments } = await syncPaidAmount(input.orderId, null);
+    return { paid, payments, synced: true };
+  } catch {
+    return { paid: 0, payments: [], synced: false };
+  }
 }
 
 /** إبطال دفعة بسبب مكتوب — لا حذف: سطر مال يُمحى لا يُراجَع. */
