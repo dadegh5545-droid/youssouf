@@ -9,16 +9,25 @@
 import {
   computeFlag,
   computeTextFlag,
+  dayOf,
   fmtDateTime,
   fmtMoney,
+  localDay,
   newMrn,
   newOrderNo,
+  orderStamp,
   pickRange,
   rangeLabel,
   verificationCode,
 } from "./lab";
 import { SEED_TESTS } from "./seedTests";
 import { CODE39, encodeCode39 } from "./barcode";
+import {
+  SCAN_MAX_GAP_MS,
+  ScanBuffer,
+  normalizeScan,
+  scanMatchesOrder,
+} from "./scanner";
 
 let failed = 0;
 let passed = 0;
@@ -250,6 +259,79 @@ check("حروف صغيرة تُرفع", encodeCode39("lab-1").text, "LAB-1");
 check("حرف غير مقبول يصير شرطة لا يُحذف", encodeCode39("A#B").text, "A-B");
 check("النجمة في البيانات لا تكسر الحدّ", encodeCode39("A*B").text, "A-B");
 console.log(`      عرض باركود "LAB-260729-812326" = ${bc.width} وحدة`);
+
+/* ── ٨. قراءة الباركود بالماسح ───────────────────────────────────
+   الخطر مرآة خطر الطباعة: مطابقة متساهلة تقول «الأنبوب صحيح» عن أنبوب
+   ليس له، ومطابقة متزمّتة تقول «خطأ» عن الأنبوب الصحيح فيتعلّم الفنّي
+   تجاهل التحذير. وتمييز المسح عن الكتابة بالسرعة يجب ألا يبتلع ما
+   يكتبه إنسان — الابتلاع هنا يعني تغيير نتيجة مريض بصمت.          */
+group("قراءة الباركود بالماسح");
+
+check("حرفا الحدّ يُحذفان", normalizeScan("*LAB-260729-000042*"), "LAB-260729-000042");
+check("الأحرف تُرفع والفراغ يُزال", normalizeScan(" lab-1 "), "LAB-1");
+check("مطابقة رقم الطلب", scanMatchesOrder("*LAB-260729-000042*", "LAB-260729-000042"), true);
+check("رقم آخر لا يطابق", scanMatchesOrder("LAB-260729-000043", "LAB-260729-000042"), false);
+// رقم فارغ يطابق كل شيء لو قورن بسذاجة — والنتيجة «الأنبوب صحيح» دائمًا.
+check("رمز فارغ لا يطابق شيئًا", scanMatchesOrder("", ""), false);
+check("طلب بلا رقم لا يطابق", scanMatchesOrder("LAB-1", null), false);
+
+/** يغذّي المخزن بنص كامل بفاصل زمني ثابت بين الأحرف. */
+function feed(text: string, gapMs: number): string | null {
+  const buf = new ScanBuffer();
+  let t = 1000;
+  for (const ch of text) {
+    buf.push(ch, t);
+    t += gapMs;
+  }
+  return buf.flush();
+}
+
+const FAST = SCAN_MAX_GAP_MS - 10;
+const HUMAN = SCAN_MAX_GAP_MS + 50;
+
+check("دفعة سريعة تُقرأ رمزًا", feed("LAB-260729-000042", FAST), "LAB-260729-000042");
+check("كتابة بشرية بطيئة لا تتراكم", feed("LAB-260729-000042", HUMAN), null);
+check("رمز أقصر من الحدّ الأدنى يُهمَل", feed("A1", FAST), null);
+check(
+  "حرف خارج أبجدية Code 39 يُبطل الدفعة",
+  feed("LAB-26ج0729-000042", FAST),
+  null
+);
+check("الدفعة تُفرَّغ بعد القراءة", (() => {
+  const buf = new ScanBuffer();
+  let t = 1000;
+  for (const ch of "LAB-1234") { buf.push(ch, t); t += FAST; }
+  buf.flush();
+  return buf.flush();
+})(), null);
+check("دفعة جديدة بعد صمت تبدأ نظيفة", (() => {
+  const buf = new ScanBuffer();
+  let t = 1000;
+  for (const ch of "XXXX") { buf.push(ch, t); t += FAST; }
+  t += 5000; // صمت طويل: أنبوب آخر
+  for (const ch of "LAB-1234") { buf.push(ch, t); t += FAST; }
+  return buf.flush();
+})(), "LAB-1234");
+
+/* ── ٩. أيام وأختام التواريخ ─────────────────────────────────────
+   `day` مفتاح تقسيم التقارير: طلب بيوم خاطئ يُحتسب إيراده في اليوم
+   الخطأ، وطلب بلا يوم يغيب عن كل تقرير بلا رسالة. و`orderStamp` جزء
+   من رقم الطلب المطبوع على الأنبوب.                              */
+group("أيام وأختام التواريخ");
+
+const noon = new Date(2026, 6, 29, 12, 0, 0); // ٢٩ يوليو ٢٠٢٦ محليًّا
+check("اليوم المحلي YYYY-MM-DD", localDay(noon), "2026-07-29");
+check("ختم اليوم YYMMDD", orderStamp(noon), "260729");
+check("خانتان للشهر واليوم", orderStamp(new Date(2026, 0, 5)), "260105");
+check("يوم الطلب من طابعه الزمني", dayOf(noon.toISOString()), "2026-07-29");
+// الملء الرجعي يمرّ على طلبات قديمة قد تحمل طابعًا ناقصًا.
+check("طابع مفقود لا يخترع يومًا", dayOf(null), null);
+check("طابع تالف لا يخترع يومًا", dayOf("ليس تاريخًا"), null);
+check(
+  "رقم الطلب العشوائي يحمل ختم اليوم",
+  newOrderNo().startsWith(`LAB-${orderStamp()}-`),
+  true
+);
 
 /* ── النتيجة ───────────────────────────────────────────────── */
 console.log(

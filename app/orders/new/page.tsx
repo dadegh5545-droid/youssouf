@@ -2,14 +2,7 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import {
-  audit,
-  client,
-  listAll,
-  localDay,
-  reserveOrderNo,
-  useSession,
-} from "@/lib/amplify";
+import { audit, client, listAll, nextOrderNo, useSession } from "@/lib/amplify";
 import type { Schema } from "@/amplify/data/resource";
 import {
   DEPARTMENT_LABEL,
@@ -17,7 +10,7 @@ import {
   ageInYears,
   ageLabel,
   fmtMoney,
-  newOrderNo,
+  localDay,
   pickRange,
   rangeLabel,
 } from "@/lib/lab";
@@ -137,9 +130,9 @@ function NewOrder() {
     setSaving(true);
     setMsg("");
     try {
-      // رقم الطلب يُطبع على الباركود الملصق على الأنبوب: نتحقق من عدم
-      // وجوده قبل الإنشاء. الفهرس الثانوي ليس قيد تفرّد في DynamoDB.
-      const orderNo = await reserveOrderNo(newOrderNo);
+      // رقم الطلب يُطبع على الباركود الملصق على الأنبوب: يحجزه عدّاد
+      // تسلسلي ذرّي في الخادم، ويُتحقّق من عدم وجوده قبل الإنشاء.
+      const orderNo = await nextOrderNo();
       const { data: order, errors } = await client.models.Order.create({
         orderNo,
         patientId: patient.id,

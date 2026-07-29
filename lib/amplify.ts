@@ -7,6 +7,7 @@ import { Hub } from "aws-amplify/utils";
 import { useEffect, useState } from "react";
 import outputs from "@/amplify_outputs.json";
 import type { Schema } from "@/amplify/data/resource";
+import { localDay, newOrderNo as randomOrderNo, orderStamp } from "@/lib/lab";
 
 Amplify.configure(outputs, { ssr: true });
 
@@ -249,18 +250,48 @@ export async function listAll<T>(
    صراحةً قبل الإنشاء ونعيد التوليد عند التصادم.                  */
 
 async function reserveUnique(
-  generate: () => string,
+  generate: () => string | Promise<string>,
   exists: (candidate: string) => Promise<boolean>,
   what: string
 ): Promise<string> {
   for (let attempt = 0; attempt < 10; attempt++) {
-    const candidate = generate();
+    const candidate = await generate();
     if (!(await exists(candidate))) return candidate;
   }
   throw new Error(`تعذّر توليد ${what} فريد بعد ١٠ محاولات — أعد المحاولة.`);
 }
 
-export function reserveOrderNo(generate: () => string): Promise<string> {
+/**
+ * رقم الطلب التالي: العدّاد التسلسلي الذرّي أولًا (LAB-260728-000042).
+ *
+ * الرجوع إلى التوليد العشوائي عند تعذّر الدالة مقصود: عطلٌ في العدّاد
+ * يجب أن يبطئ المختبر لا أن يوقف استقبال المرضى. والرقمان بالطول نفسه
+ * فلا يتغيّر عرض الباركود ولا تخطيط الملصق أيًّا كان المصدر.
+ *
+ * ويبقى فحص الوجود فوق العدّاد رغم ذرّيته: طلبات اليوم القديمة وُلّدت
+ * عشوائيًا وقد يصادف أحدها رقمًا تسلسليًا. الفحص يكشفه، والمحاولة
+ * التالية تأخذ الرقم الذي يليه.
+ */
+export function nextOrderNo(): Promise<string> {
+  return reserveOrderNo(async () => {
+    try {
+      const { data, errors } = await client.mutations.nextOrderNo({
+        stamp: orderStamp(),
+      });
+      if (errors?.length) throw new Error(errors[0].message);
+      const parsed = parseJson<{ orderNo?: string }>(data);
+      if (!parsed?.orderNo) throw new Error("ردّ فارغ من عدّاد الأرقام");
+      return parsed.orderNo;
+    } catch (e) {
+      console.warn("تعذّر العدّاد التسلسلي — رقم عشوائي بديل", e);
+      return randomOrderNo();
+    }
+  });
+}
+
+/* غير مُصدَّرة: المدخل الوحيد لأرقام الطلبات هو `nextOrderNo` أعلاه.
+   صفحة تولّد رقمًا بطريقتها تتخطّى العدّاد وتعيد نافذة السباق. */
+function reserveOrderNo(generate: () => string | Promise<string>): Promise<string> {
   return reserveUnique(
     generate,
     async (orderNo) => {
@@ -310,19 +341,11 @@ export async function audit(entry: {
       summary: entry.summary,
       before: entry.before ? JSON.stringify(entry.before) : undefined,
       after: entry.after ? JSON.stringify(entry.after) : undefined,
-      /* مفتاحا الفهرس. `day` بالتوقيت المحلي لا UTC: مدير المختبر يسأل
-         عن «ما جرى اليوم» بيومه هو، وسطر أُدخل الساعة الثانية صباحًا
-         بالرياض يظهر في يوم أمس لو حُسب بـ UTC. */
+      // مفتاحا الفهرس: `day` مفتاح التقسيم و`at` مفتاح الفرز.
       day: localDay(now),
       at: now.toISOString(),
     });
   } catch (e) {
     console.warn("audit log failed", e);
   }
-}
-
-/** تاريخ محلي بصيغة YYYY-MM-DD — مفتاح تقسيم سجل التدقيق. */
-export function localDay(d: Date = new Date()): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }

@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { client, listAll } from "@/lib/amplify";
+import { useBarcodeScanner } from "@/lib/scanner";
 import type { Schema } from "@/amplify/data/resource";
 import { PRIORITY_LABEL, STATUS_META, fmtDateTime, fmtMoney } from "@/lib/lab";
 
@@ -21,12 +23,40 @@ const FILTERS: { key: string; label: string }[] = [
 ];
 
 export default function OrdersPage() {
+  const router = useRouter();
   const [orders, setOrders] = useState<Order[]>([]);
   const [patients, setPatients] = useState<Map<string, Patient>>(new Map());
   const [filter, setFilter] = useState("ACTIVE");
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState("");
+
+  /* مسح باركود الأنبوب يفتح طلبه مباشرة. الاستعلام على فهرس `orderNo`
+     لا بحث في القائمة المحمّلة: الفنّي قد يكون على تصنيف «معتمد» بينما
+     الأنبوب الذي في يده «قيد التحليل»، فلا يُعثر عليه في المعروض. */
+  const openScanned = useCallback(
+    async (code: string) => {
+      setMsg("");
+      try {
+        const { data, errors } = await client.models.Order.listOrdersByOrderNo(
+          { orderNo: code },
+          { limit: 1, selectionSet: ["id"] }
+        );
+        if (errors?.length) throw new Error(errors[0].message);
+        const hit = data?.[0];
+        if (!hit) {
+          setMsg(`لا يوجد طلب بالرقم ${code} — تأكّد من الملصق.`);
+          return;
+        }
+        router.push(`/orders/view?id=${hit.id}`);
+      } catch (e) {
+        setMsg(`تعذّر البحث عن الرقم الممسوح: ${(e as Error).message}`);
+      }
+    },
+    [router]
+  );
+
+  useBarcodeScanner(openScanned);
 
   useEffect(() => {
     (async () => {
@@ -84,7 +114,10 @@ export default function OrdersPage() {
       <div className="page-head">
         <div>
           <h1>قائمة العمل</h1>
-          <p>الطلبات مرتّبة حسب الأولوية — المستعجل أولًا.</p>
+          <p>
+            الطلبات مرتّبة حسب الأولوية — المستعجل أولًا. 📷 امسح باركود الأنبوب
+            لفتح طلبه مباشرة.
+          </p>
         </div>
         <Link href="/orders/new" className="btn primary">
           + طلب جديد

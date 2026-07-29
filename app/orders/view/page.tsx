@@ -1,10 +1,20 @@
 "use client";
 
-import { Fragment, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Fragment,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { audit, client, listAll, useSession } from "@/lib/amplify";
 import { actionLabel } from "@/lib/audit";
+import { scanMatchesOrder } from "@/lib/scanner";
+import ScanBox from "@/app/components/ScanBox";
 import type { Schema } from "@/amplify/data/resource";
 import {
   DEPARTMENT_LABEL,
@@ -57,6 +67,15 @@ function OrderPage() {
   const [history, setHistory] = useState<Log[] | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
 
+  /* نتيجة مطابقة الأنبوب الممسوح بهذا الطلب. */
+  const [tube, setTube] = useState<{
+    code: string;
+    ok: boolean;
+    otherId?: string;
+  } | null>(null);
+  /* الرموز التي سُجّلت في سجل التدقيق — كي لا يكتب مسحٌ مكرَّر سطرًا جديدًا. */
+  const loggedScans = useRef<Set<string>>(new Set());
+
   const load = useCallback(async () => {
     if (!orderId) {
       setLoading(false);
@@ -108,6 +127,13 @@ function OrderPage() {
       setLoading(false);
     });
   }, [load]);
+
+  /* الانتقال إلى طلب آخر يبقي المكوّن نفسه حيًّا (نفس المسار، معامل مختلف).
+     بلا هذا التصفير تبقى لافتة «الأنبوب مطابق» معروضة فوق طلب لم يُمسح. */
+  useEffect(() => {
+    setTube(null);
+    loggedScans.current = new Set();
+  }, [orderId]);
 
   /** العَلَم المحسوب لحظيًا من القيمة المكتوبة (قبل الحفظ). */
   const flagOf = useCallback(
@@ -556,6 +582,62 @@ function OrderPage() {
     }
   }
 
+  /**
+   * مطابقة الأنبوب الممسوح بهذا الطلب.
+   *
+   * هذا هو الحاجز الأخير قبل نسبة نتيجة إلى مريض خطأ: الفنّي يفتح طلبًا
+   * على الشاشة ويحمل أنبوبًا في يده، ولا شيء يربط بينهما إلا انتباهه.
+   * أنبوبان متجاوران على الحامل يكفيان.
+   *
+   * عدم التطابق يُسجَّل في سجل التدقيق كما يُسجَّل التطابق: «كاد أن يقع»
+   * (near miss) هو ما تبحث عنه مراجعة الجودة، وحذفه يُخفي أخطر ما جرى.
+   */
+  async function handleScan(code: string) {
+    if (!order) return;
+    setMsg("");
+
+    if (scanMatchesOrder(code, order.orderNo)) {
+      setTube({ code, ok: true });
+      if (!loggedScans.current.has(code)) {
+        loggedScans.current.add(code);
+        await audit({
+          entity: "Order",
+          entityId: order.id,
+          action: "TUBE_VERIFIED",
+          actor: session.actor,
+          summary: `مطابقة أنبوب الطلب ${order.orderNo} قبل إدخال النتائج`,
+        });
+      }
+      return;
+    }
+
+    // رمز لا يخصّ هذا الطلب: نبحث عن صاحبه كي يفتحه الفنّي بضغطة واحدة
+    // بدل أن يعود إلى القائمة ويبحث بيده — الاختصار هنا يقلّل إغراء
+    // تجاهل التحذير.
+    let otherId: string | undefined;
+    try {
+      const { data } = await client.models.Order.listOrdersByOrderNo(
+        { orderNo: code },
+        { limit: 1, selectionSet: ["id"] }
+      );
+      otherId = data?.[0]?.id;
+    } catch {
+      /* تعذّر البحث لا يمنع عرض التحذير — والتحذير هو المهم. */
+    }
+    setTube({ code, ok: false, otherId });
+
+    if (!loggedScans.current.has(code)) {
+      loggedScans.current.add(code);
+      await audit({
+        entity: "Order",
+        entityId: order.id,
+        action: "TUBE_MISMATCH",
+        actor: session.actor,
+        summary: `أنبوب ممسوح لا يطابق الطلب المفتوح: ${code} ≠ ${order.orderNo}`,
+      });
+    }
+  }
+
   if (loading) return <p className="muted">جارٍ التحميل…</p>;
   if (!order)
     return (
@@ -753,6 +835,47 @@ function OrderPage() {
 
       {order.clinicalNotes && (
         <div className="alert">الشكوى: {order.clinicalNotes}</div>
+      )}
+
+      {!cancelled && (canEnter || session.can("collectSample")) && (
+        <div className="card no-print" style={{ marginBottom: 16 }}>
+          <div className="card-head">
+            <h2 style={{ margin: 0, fontSize: "1rem" }}>مطابقة الأنبوب</h2>
+            <ScanBox onScan={handleScan} />
+          </div>
+
+          {!tube && (
+            <p className="muted small" style={{ margin: 0 }}>
+              امسح باركود الأنبوب قبل إدخال النتائج ليتأكّد النظام أنه يخصّ هذا
+              الطلب. المسح اختياري ولا يمنع الحفظ، ويُسجَّل في سجل الطلب.
+            </p>
+          )}
+
+          {tube?.ok && (
+            <div className="alert ok" style={{ margin: 0 }}>
+              ✓ الأنبوب <span className="mono">{tube.code}</span> يطابق هذا الطلب.
+            </div>
+          )}
+
+          {tube && !tube.ok && (
+            <div className="alert danger" style={{ margin: 0 }}>
+              ⚠️ الأنبوب الممسوح <span className="mono">{tube.code}</span> لا يخصّ
+              هذا الطلب (<span className="mono">{order.orderNo}</span>). لا تُدخل
+              نتائجه هنا.
+              {tube.otherId ? (
+                <div style={{ marginTop: 8 }}>
+                  <Link href={`/orders/view?id=${tube.otherId}`} className="btn sm">
+                    فتح الطلب الصحيح
+                  </Link>
+                </div>
+              ) : (
+                <div className="small" style={{ fontWeight: 400, marginTop: 6 }}>
+                  ولا يوجد طلب بهذا الرقم في النظام — راجع الملصق.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       <div className="table-wrap">

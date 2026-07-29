@@ -1,9 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { client, listAll, localDay, useSession } from "@/lib/amplify";
+import { client, listAll, useSession } from "@/lib/amplify";
 import { useLabConfig } from "@/lib/config";
-import { fmtMoney } from "@/lib/lab";
+import { fmtMoney, localDay } from "@/lib/lab";
 import type { Schema } from "@/amplify/data/resource";
 
 type Order = Schema["Order"]["type"];
@@ -222,7 +222,11 @@ export default function ReportsPage() {
       <div className="page-head">
         <div>
           <h1>تقارير الإدارة</h1>
-          <p>الإيراد والإنتاجية وزمن الإنجاز على فترة تختارها.</p>
+          <p>
+            الإيراد والإنتاجية وزمن الإنجاز على فترة تختارها. الطلبات المنشأة قبل
+            إضافة حقل اليوم لا تُحتسب هنا — يعالجها «صيانة البيانات» في صفحة
+            الإعدادات.
+          </p>
         </div>
         <div className="row no-print">
           <input

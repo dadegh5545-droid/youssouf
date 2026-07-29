@@ -17,6 +17,9 @@ export const ACTION_LABEL: Record<string, string> = {
   REPORT_DELIVERED: "تسليم تقرير",
   ORDER_CANCELLED: "إلغاء طلب",
   CRITICAL_NOTIFIED: "إبلاغ عن قيمة حرجة",
+  TUBE_VERIFIED: "مطابقة أنبوب",
+  TUBE_MISMATCH: "أنبوب غير مطابق",
+  DAY_BACKFILLED: "ملء رجعي ليوم الطلب",
   PAYMENT_RECORDED: "تسجيل دفعة",
   PRICE_CHANGED: "تغيير سعر",
   TEST_CREATED: "إضافة فحص",
@@ -33,6 +36,8 @@ export const NOTABLE = new Set([
   "RESULT_AMENDED",
   "REPORT_AMENDED",
   "ORDER_CANCELLED",
+  // «كاد أن يقع»: أنبوب مريض أمام طلب مريض آخر. أهمّ ما يُراجَع.
+  "TUBE_MISMATCH",
   "PRICE_CHANGED",
   "STAFF_ADD_GROUP",
   "STAFF_REMOVE_GROUP",

@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSession } from "@/lib/amplify";
+import { audit, client, listAll, useSession } from "@/lib/amplify";
 import {
   CURRENCY_PRESETS,
   DEFAULT_SAMPLE_TYPES,
   DEFAULT_TUBE_TYPES,
   useLabConfig,
 } from "@/lib/config";
-import { fmtMoney } from "@/lib/lab";
+import { dayOf, fmtMoney } from "@/lib/lab";
 
 /**
  * إعدادات المختبر — لمدير المختبر.
@@ -180,7 +180,155 @@ export default function SettingsPage() {
           />
         </div>
       </div>
+
+      {canManage && <DayBackfill />}
     </>
+  );
+}
+
+/* `selectionSet` يقصر الجلب على أربعة حقول: الفحص يمرّ على كل طلب في
+   النظام، وجلب الطلب كاملًا يضاعف حجم النقل بلا فائدة. */
+type SlimOrder = {
+  id: string;
+  orderNo: string;
+  createdAt: string;
+  day: string | null;
+};
+
+/**
+ * ملء الحقل `day` على الطلبات القديمة.
+ *
+ * الحقل أُضيف بعد أن كان النظام يعمل، فالطلبات الأقدم منه لا تحمله —
+ * وتقارير الإدارة تقرأ عبر فهرس `day`، فتلك الطلبات غائبة عن كل تقرير
+ * فترة: إيرادها لا يُحتسب وعدد فحوصها لا يظهر. لا خطأ يُعرض، الأرقام
+ * تنقص بصمت وحسب.
+ *
+ * اليوم يُستخرج من `createdAt` بتوقيت المتصفّح — وهو ما يفعله إنشاء
+ * الطلب أصلًا، فيتطابق القديم مع الجديد. لذلك تُشغَّل هذه العملية من
+ * جهاز على توقيت المختبر لا من جهاز في منطقة زمنية أخرى.
+ *
+ * عملية تُشغَّل مرة ثم لا تجد ما تعمله: بعدها تقول «كل الطلبات محدَّثة».
+ */
+function DayBackfill() {
+  const session = useSession();
+  const [scan, setScan] = useState<{ total: number; missing: SlimOrder[] } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [progress, setProgress] = useState(0);
+
+  async function check() {
+    setBusy(true);
+    setMsg("");
+    try {
+      const all = await listAll<SlimOrder>((nextToken) =>
+        client.models.Order.list({
+          limit: 500,
+          nextToken,
+          selectionSet: ["id", "orderNo", "createdAt", "day"],
+        })
+      );
+      setScan({ total: all.length, missing: all.filter((o) => !o.day) });
+    } catch (e) {
+      setMsg(`تعذّر الفحص: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function run() {
+    if (!scan?.missing.length) return;
+    setBusy(true);
+    setMsg("");
+    setProgress(0);
+    let done = 0;
+    let skipped = 0;
+    let at = "";
+    try {
+      for (const o of scan.missing) {
+        at = o.orderNo;
+        const day = dayOf(o.createdAt);
+        if (!day) {
+          // طابع زمني مفقود أو تالف: نتركه بلا يوم بدل أن نضعه في يوم
+          // مخترَع يشوّه تقرير تلك الفترة.
+          skipped++;
+          continue;
+        }
+        const { errors } = await client.models.Order.update({ id: o.id, day });
+        if (errors?.length) throw new Error(errors[0].message);
+        done++;
+        setProgress(done + skipped);
+      }
+
+      await audit({
+        entity: "Order",
+        entityId: "BACKFILL",
+        action: "DAY_BACKFILLED",
+        actor: session.actor,
+        summary: `ملء رجعي للحقل day على ${done} طلب${
+          skipped ? ` · ${skipped} تُخطّي لتعذّر قراءة تاريخ إنشائه` : ""
+        }`,
+      });
+
+      setMsg(
+        `اكتمل: حُدّث ${done} طلب${
+          skipped ? ` · تُخطّي ${skipped} لتعذّر قراءة تاريخ إنشائه` : ""
+        }. صارت هذه الطلبات تظهر في التقارير.`
+      );
+      await check();
+    } catch (e) {
+      // كل طلب تحديث مستقل، فما نجح قبل العطل محفوظ فعلًا. إعادة
+      // التشغيل تمرّ على الناقص وحده لا على الجميع.
+      setMsg(
+        `توقّف بعد ${done} طلب عند ${at}: ${(e as Error).message} — ما حُدّث محفوظ، أعد التشغيل للباقي.`
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <div className="card-head">
+        <h2>صيانة البيانات</h2>
+        <button className="btn sm" onClick={check} disabled={busy}>
+          {busy && !scan ? "جارٍ الفحص…" : "فحص الطلبات"}
+        </button>
+      </div>
+
+      <p className="muted small" style={{ marginTop: 0 }}>
+        الطلبات المنشأة قبل إضافة حقل اليوم (<span className="mono">day</span>) لا
+        تظهر في صفحة التقارير — لا في الإيراد ولا في عدد الفحوص. هذا الفحص يعدّها،
+        والملء الرجعي يستخرج يوم كل طلب من تاريخ إنشائه.
+      </p>
+
+      {msg && <div className="alert">{msg}</div>}
+
+      {scan && (
+        <div className="row" style={{ alignItems: "center" }}>
+          <span className="badge info">{scan.total} طلب في النظام</span>
+          {scan.missing.length === 0 ? (
+            <span className="badge ok">كلّها تحمل يومًا — لا حاجة لشيء</span>
+          ) : (
+            <>
+              <span className="badge warn">
+                {scan.missing.length} طلب بلا يوم — غائب عن التقارير
+              </span>
+              <button className="btn primary" onClick={run} disabled={busy}>
+                {busy
+                  ? `جارٍ التحديث… ${progress}/${scan.missing.length}`
+                  : "تشغيل الملء الرجعي"}
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {scan && scan.missing.length > 0 && !busy && (
+        <p className="muted small" style={{ marginBottom: 0 }}>
+          يُستخرج اليوم بتوقيت هذا الجهاز — شغّله من جهاز على توقيت المختبر.
+        </p>
+      )}
+    </div>
   );
 }
 

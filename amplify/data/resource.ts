@@ -1,6 +1,7 @@
 import { type ClientSchema, a, defineData } from "@aws-amplify/backend";
 import { getMyReport } from "../functions/get-my-report/resource";
 import { manageStaff } from "../functions/manage-staff/resource";
+import { nextOrderNo } from "../functions/next-order-no/resource";
 
 /**
  * نموذج بيانات نظام إدارة المختبر الطبي (LIS).
@@ -106,6 +107,19 @@ const schema = a.schema({
       allow.groups(["admin"]),
       allow.authenticated().to(["read"]),
     ]),
+
+  /* ── عدّاد أرقام الطلبات ─────────────────────────────────────
+     سجل لكل يوم (`ORDER-YYMMDD`) يحمل آخر رقم صدر فيه. الكتابة عليه
+     محصورة بدالة `next-order-no` عبر مقارنة-وتبديل ذرّية؛ لا عميل
+     يكتب هنا، لأن من يكتب على العدّاد يستطيع إعادة إصدار رقم مستعمل.
+     القراءة متاحة للمدير وحده كي يرى عدّاد اليوم عند الحاجة.        */
+  Counter: a
+    .model({
+      key: a.string().required(),
+      value: a.integer().required(),
+    })
+    .identifier(["key"])
+    .authorization((allow) => [allow.groups(["admin"]).to(["read"])]),
 
   /* ── المريض ─────────────────────────────────────────────────── */
   Patient: a
@@ -300,10 +314,24 @@ const schema = a.schema({
     .returns(a.json())
     .handler(a.handler.function(manageStaff))
     .authorization((allow) => [allow.groups(["admin"])]),
+
+  /* ── حجز رقم الطلب التالي ────────────────────────────────────
+     `stamp` هو ختم اليوم (YYMMDD) بتوقيت المختبر المحلي، يرسله العميل
+     لأن الدالة تعمل بتوقيت UTC. من يملك إنشاء الطلبات يملك حجز رقم:
+     الحجز بلا إنشاء يحرق رقمًا لا أكثر.                            */
+  nextOrderNo: a
+    .mutation()
+    .arguments({ stamp: a.string().required() })
+    .returns(a.json())
+    .handler(a.handler.function(nextOrderNo))
+    .authorization((allow) => [allow.groups(["admin", "reception"])]),
 })
-  // الدالة تقرأ الجداول بالنيابة عن الزائر بعد التحقّق، فتحتاج صلاحية
-  // استعلام على المخطط — وهي وحدها، لا الزائر.
-  .authorization((allow) => [allow.resource(getMyReport).to(["query"])]);
+  // الدوال تقرأ الجداول وتكتب فيها بالنيابة عن المستخدم بعد التحقّق،
+  // فتحتاج صلاحية على المخطط — وهي وحدها، لا العميل.
+  .authorization((allow) => [
+    allow.resource(getMyReport).to(["query"]),
+    allow.resource(nextOrderNo).to(["query", "mutate"]),
+  ]);
 
 export type Schema = ClientSchema<typeof schema>;
 

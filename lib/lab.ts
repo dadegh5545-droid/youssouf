@@ -188,19 +188,54 @@ function randomDigits(n: number): string {
 }
 
 /**
- * ٦ خانات = مليون احتمال في اليوم بدل ١٠٬٠٠٠.
- * التفرّد الفعلي مضمون بفحص الرقم قبل الإنشاء في `reserveOrderNo`
- * (lib/amplify.ts)؛ هذه الخانات تجعل إعادة المحاولة نادرة جدًا.
+ * تاريخ محلي بصيغة YYYY-MM-DD — مفتاح تقسيم الطلبات وسجل التدقيق.
+ *
+ * محلي لا UTC: مدير المختبر يسأل عن «ما جرى اليوم» بيومه هو، وسطر
+ * أُدخل الساعة الثانية صباحًا بالرياض يظهر في يوم أمس لو حُسب بـ UTC.
+ */
+export function localDay(d: Date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/**
+ * يوم إنشاء طلب قديم، مستخرجًا من طابعه الزمني — للملء الرجعي للحقل
+ * `day`. يرجع `null` لطابع مفقود أو تالف بدل أن يخترع يومًا: طلب في
+ * اليوم الخطأ يشوّه تقرير الإيراد أكثر من طلب خارج التقرير.
+ */
+export function dayOf(createdAt?: string | null): string | null {
+  if (!createdAt) return null;
+  const d = new Date(createdAt);
+  return Number.isNaN(d.getTime()) ? null : localDay(d);
+}
+
+/**
+ * ختم اليوم (YYMMDD) بالتوقيت المحلي — مفتاح عدّاد أرقام الطلبات
+ * والجزء الأوسط من رقم الطلب. محلي لا UTC: طلبان في ليلة واحدة يجب
+ * أن يحملا ختم اليوم نفسه الذي يعرفه المختبر.
+ */
+export function orderStamp(d: Date = new Date()): string {
+  return (
+    String(d.getFullYear()).slice(2) +
+    String(d.getMonth() + 1).padStart(2, "0") +
+    String(d.getDate()).padStart(2, "0")
+  );
+}
+
+/**
+ * رقم طلب عشوائي — مسار احتياطي وحده.
+ *
+ * المصدر الأساسي للأرقام هو العدّاد التسلسلي الذرّي في دالة
+ * `next-order-no` (يعطي LAB-260728-000042). هذا يُستعمل حين تتعذّر
+ * الدالة، لأن تعذّر توليد رقم يعني توقّف استقبال المرضى.
+ *
+ * ٦ خانات = مليون احتمال في اليوم بدل ١٠٬٠٠٠، والتفرّد الفعلي مضمون
+ * بفحص الرقم قبل الإنشاء في `reserveOrderNo` (lib/amplify.ts).
  *
  * مثال: LAB-260728-482913
  */
 export function newOrderNo(): string {
-  const d = new Date();
-  const stamp =
-    String(d.getFullYear()).slice(2) +
-    String(d.getMonth() + 1).padStart(2, "0") +
-    String(d.getDate()).padStart(2, "0");
-  return `LAB-${stamp}-${randomDigits(6)}`;
+  return `LAB-${orderStamp()}-${randomDigits(6)}`;
 }
 
 /** P-2607-482913 — يُتحقَّق من تفرّده في `reserveMrn`. */
