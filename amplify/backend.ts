@@ -64,3 +64,27 @@ backend.orderOps.resources.lambda.addToRolePolicy(
 );
 
 backend.orderOps.addEnvironment('USER_POOL_ID', userPool.userPoolId);
+
+/* ── حماية البيانات على مستوى الجدول ────────────────────────────────
+   فجر ٣٠ يوليو ٢٠٢٦ أُعيد إنشاء الـ sandbox فضاعت البيانات كلها: مجمّع
+   مستخدمين بصفر حساب وثمانية جداول بصفر سطر. الدرس أن الحماية إن كانت
+   أمر CLI فهي تُمحى مع الجدول نفسه — فمحلّها هنا، في الكود، لتُطبَّق
+   على كل جدول يُنشأ بعدها.
+
+   `pointInTimeRecoveryEnabled` يتيح الرجوع إلى أي لحظة في آخر ٣٥ يومًا،
+   ويشمل استعادة جدول محذوف كان مُفعَّلًا عليه.
+
+   `deletionProtectionEnabled` يجعل حذف الجدول يفشل صراحةً، وهو بالضبط
+   ما كان سيمنع الضياع: حذف الحزمة كان سيتعطّل بدل أن يمضي صامتًا.
+   وثمنه أن أي تغيير في المخطَّط يستوجب استبدال الجدول سيفشل، وأن
+   `ampx sandbox delete` لن يمرّ. لرفعه مؤقّتًا: بدّل القيمة إلى false
+   ثم `npx ampx sandbox --once`، ولا تنسَ إعادتها.
+
+   الحلقة تمرّ على كل الجداول بلا تسمية، فأي نموذج جديد يُحمى تلقائيًّا
+   بلا أن يتذكّره أحد.                                              */
+for (const table of Object.values(
+  backend.data.resources.cfnResources.amplifyDynamoDbTables
+)) {
+  table.pointInTimeRecoveryEnabled = true;
+  table.deletionProtectionEnabled = true;
+}
