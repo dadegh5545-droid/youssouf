@@ -168,7 +168,6 @@ function NewOrder() {
         entity: "Order",
         entityId: order.id,
         action: "ORDER_CREATED",
-        actor: session.actor,
         summary: `طلب ${orderNo} للمريض ${patient.fullName}`,
       });
 
@@ -224,7 +223,6 @@ function NewOrder() {
             entity: "Order",
             entityId: order.id,
             action: "ORDER_CANCELLED",
-            actor: session.actor,
             summary: `إلغاء تلقائي للطلب ${orderNo}: ${reason}`,
           });
         } catch (cancelErr) {
@@ -254,7 +252,6 @@ function NewOrder() {
             entity: "Order",
             entityId: order.id,
             action: "PAYMENT_RECORDED",
-            actor: session.actor,
             summary: `دفعة أولى ${fmtMoney(Math.min(paid, net))} (${
               PAYMENT_METHOD_LABEL[method] ?? method
             }) على الطلب ${orderNo}`,

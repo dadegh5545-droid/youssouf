@@ -13,10 +13,14 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
   addPayment,
+  amendOrder,
+  approveOrder,
   audit,
   client,
+  collectOrder,
   listAll,
   must,
+  progressOrder,
   syncPaidAmount,
   useSession,
   voidPayment,
@@ -341,7 +345,6 @@ function OrderPage() {
           entity: "OrderItem",
           entityId: item.id,
           action: approved ? "RESULT_AMENDED" : "RESULT_ENTERED",
-          actor: session.actor,
           summary: `${item.testNameAr}: ${prevValue || "—"} ← ${raw || "—"}${
             reason ? ` (سبب التعديل: ${reason})` : ""
           }`,
@@ -355,31 +358,17 @@ function OrderPage() {
         return;
       }
 
+      /* رقم المراجعة وحالة الطلب كلاهما على الخادم الآن: الأول يحمل اسم
+         المعدِّل من رمزه، والثانية محسوبة من الفحوص المخزَّنة لا من
+         `allFilled` المشتقّ من مسودّة هذه الشاشة. */
       if (approved) {
-        const rev = (order.reportRevision ?? 1) + 1;
-        await must(
-          client.models.Order.update({
-            id: order.id,
-            reportRevision: rev,
-            amendedAt: now,
-            amendedBy: session.name || session.actor,
-            amendReason: reason,
-          })
-        );
-        await audit({
-          entity: "Order",
-          entityId: order.id,
-          action: "REPORT_AMENDED",
-          actor: session.actor,
-          summary: `تعديل تقرير معتمد ${order.orderNo} — مراجعة ${rev}: ${reason}`,
-        });
+        const { reportRevision: rev } = await amendOrder(order.id, reason);
         setMsg(`حُفظت ${changed} نتيجة. صدرت مراجعة رقم ${rev} من التقرير.`);
       } else {
-        const nextStatus = allFilled ? "PENDING_REVIEW" : "IN_PROGRESS";
-        await must(client.models.Order.update({ id: order.id, status: nextStatus }));
+        const { orderStatus } = await progressOrder(order.id);
         setMsg(
           `حُفظت ${changed} نتيجة.${
-            allFilled ? " الطلب الآن بانتظار الاعتماد." : ""
+            orderStatus === "PENDING_REVIEW" ? " الطلب الآن بانتظار الاعتماد." : ""
           }`
         );
       }
@@ -396,23 +385,10 @@ function OrderPage() {
     if (!order) return;
     setBusy(true);
     try {
-      /* الحالة لا تُرجَع إلى `COLLECTED` إن كان العمل قد تقدّم: تسجيل
-         سحب متأخر يجب أن يثبّت الوقت لا أن يعيد الطلب إلى الوراء. */
-      const backwards = order.status !== "REGISTERED";
-      const { errors } = await client.models.Order.update({
-        id: order.id,
-        ...(backwards ? {} : { status: "COLLECTED" as const }),
-        collectedAt: new Date().toISOString(),
-        collectedBy: session.actor,
-      });
-      if (errors?.length) throw new Error(errors[0].message);
-      await audit({
-        entity: "Order",
-        entityId: order.id,
-        action: "SAMPLE_COLLECTED",
-        actor: session.actor,
-        summary: `سحب عيّنة الطلب ${order.orderNo}`,
-      });
+      /* على الخادم: اسم الساحب من رمزه، والحالة لا تُرجَع إلى الوراء إن
+         كان العمل قد تقدّم (تسجيل سحب متأخّر يثبّت الوقت لا أكثر).
+         وبها يعمل الفنّي أيضًا — لا يملك `update` على `Order`. */
+      await collectOrder(order.id);
       await load();
     } catch (e) {
       setMsg(`تعذّرت العملية: ${(e as Error).message}`);
@@ -466,34 +442,13 @@ function OrderPage() {
     setBusy(true);
     setMsg("");
     try {
-      const now = new Date().toISOString();
-      for (const i of items) {
-        await must(
-          client.models.OrderItem.update({
-            id: i.id,
-            verifiedBy: session.actor,
-            verifiedAt: now,
-          })
-        );
-      }
-      await must(
-        client.models.Order.update({
-          id: order.id,
-          status: "APPROVED",
-          approvedAt: now,
-          approvedBy: session.name || session.actor,
-        })
-      );
-      await audit({
-        entity: "Order",
-        entityId: order.id,
-        action: "ORDER_APPROVED",
-        actor: session.actor,
-        summary:
-          `اعتماد الطلب ${order.orderNo} (${items.length} فحص)` +
-          (selfEntered.length > 0
-            ? ` — اعتماد ذاتي بصلاحية مدير لـ ${selfEntered.length} نتيجة أدخلها المعتمِد نفسه`
-            : ""),
+      /* الاعتماد كله على الخادم: يعيد فحص الشروط الثلاثة من المخزَّن،
+         ويختم كل سطر نتيجة، ويكتب `approvedBy` من رمز المعتمِد لا من
+         حمولة الطلب. والحواجز أعلاه تنبيه للموظف لا حماية — والتأكيدان
+         يُمرَّران ليعرف الخادم أنه رأى التنبيه ووافق عليه. */
+      await approveOrder(order.id, {
+        selfEntered: selfEntered.length > 0,
+        criticals: pending.length > 0,
       });
       setMsg("تم اعتماد النتائج — التقرير جاهز للطباعة.");
       await load();
@@ -527,7 +482,6 @@ function OrderPage() {
         entity: "Order",
         entityId: order.id,
         action: "REPORT_DELIVERED",
-        actor: session.actor,
         summary: `تسليم تقرير ${order.orderNo} إلى ${who.trim() || "—"}`,
       });
       setMsg("سُجّل تسليم التقرير.");
@@ -600,7 +554,6 @@ function OrderPage() {
         entity: "Order",
         entityId: order.id,
         action: "PAYMENT_RECORDED",
-        actor: session.actor,
         summary:
           `دفعة ${fmtMoney(amount)} (${PAYMENT_METHOD_LABEL[method] ?? method}) ` +
           `على الطلب ${order.orderNo} — المتبقّي ${fmtMoney(orderDue(net, res.paid))}`,
@@ -641,7 +594,6 @@ function OrderPage() {
         entity: "Order",
         entityId: order.id,
         action: "PAYMENT_VOIDED",
-        actor: session.actor,
         summary: `إبطال دفعة ${fmtMoney(p.amount)} على الطلب ${order.orderNo}: ${reason.trim()}`,
         before: { amount: p.amount, at: p.at, receivedBy: p.receivedBy },
       });
@@ -730,7 +682,6 @@ function OrderPage() {
         entity: "Order",
         entityId: order.id,
         action: "ORDER_CANCELLED",
-        actor: session.actor,
         // المبلغ في السطر نفسه: مراجعة الصندوق تبحث عن الملغى بمال.
         summary:
           `إلغاء الطلب ${order.orderNo}: ${reason.trim()}` +
@@ -764,7 +715,6 @@ function OrderPage() {
         entity: "OrderItem",
         entityId: item.id,
         action: "CRITICAL_NOTIFIED",
-        actor: session.actor,
         summary: `إبلاغ ${who} بقيمة حرجة في ${item.testNameAr}`,
       });
       await load();
@@ -797,7 +747,6 @@ function OrderPage() {
           entity: "Order",
           entityId: order.id,
           action: "TUBE_VERIFIED",
-          actor: session.actor,
           summary: `مطابقة أنبوب الطلب ${order.orderNo} قبل إدخال النتائج`,
         });
       }
@@ -825,7 +774,6 @@ function OrderPage() {
         entity: "Order",
         entityId: order.id,
         action: "TUBE_MISMATCH",
-        actor: session.actor,
         summary: `أنبوب ممسوح لا يطابق الطلب المفتوح: ${code} ≠ ${order.orderNo}`,
       });
     }

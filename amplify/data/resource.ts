@@ -2,6 +2,7 @@ import { type ClientSchema, a, defineData } from "@aws-amplify/backend";
 import { getMyReport } from "../functions/get-my-report/resource";
 import { manageStaff } from "../functions/manage-staff/resource";
 import { nextOrderNo } from "../functions/next-order-no/resource";
+import { orderOps } from "../functions/order-ops/resource";
 
 /**
  * نموذج بيانات نظام إدارة المختبر الطبي (LIS).
@@ -226,19 +227,27 @@ const schema = a.schema({
          حُذف من خارج الواجهة وبقيت ستة سطور نتائج يتيمة. الطلب الخطأ
          يُلغى (`cancelledAt` + `cancelReason`) ويبقى ظاهرًا. */
       allow.groups(["admin", "reception"]).to(["create", "read", "update"]),
-      /* `quality` يعتمد النتائج ويصحّح التقارير المعتمدة، فيحتاج `update`.
-         `tech` كان يملكها أيضًا وهو لا يحتاجها: عمله على `OrderItem`،
-         وحالة الطلب تنتقل إلى `IN_PROGRESS`/`PENDING_REVIEW` بحفظ
-         النتائج.
+      /* **`quality` صار `read` وحده.** كان يملك `update` ليعتمد النتائج
+         ويصحّح التقارير المعتمدة، لكن صلاحيات AppSync على مستوى العملية
+         لا الحقل: من يملك `update` على `Order` يملكه على كل حقوله معًا —
+         `status` و`approvedBy` و`discount`. فكان مسؤول الجودة يستطيع من
+         خارج الواجهة أن يكتب `status: APPROVED` و`approvedBy` باسم زميل
+         له، فيصدر تقرير مختبر باعتماد لم يقع ممّن نُسب إليه؛ وشرط «أربع
+         أعين» كان في الشاشة وحدها.
 
-         ⚠️ قيد باقٍ معروف: صلاحيات AppSync على مستوى العملية لا الحقل،
-         فمن يملك `update` على `Order` يملكه على كل حقوله — بما فيها
-         `status` و`approvedBy` و`discount`. أي أن `quality` يستطيع من
-         خارج الواجهة كتابة اعتماد باسم غيره أو تغيير خصم. الإغلاق الكامل
-         ينقل الاعتماد وحقول المال إلى عمليات مخصّصة تنفّذها Lambda —
-         مسجَّل في «المرحلة التالية». */
-      allow.groups(["quality"]).to(["read", "update"]),
-      allow.groups(["tech", "doctor"]).to(["read"]),
+         الاعتماد والمراجعة وتقديم الحالة انتقلت إلى طفرات `approveOrder`
+         و`amendOrder` و`progressOrder` تنفّذها دالة `order-ops`: تشتقّ
+         الهوية من `event.identity` وتتحقّق من المخزَّن.
+
+         `tech` بقي `read`: عمله على `OrderItem`، وتقديم حالة الطلب صار
+         بالطفرة. (وهذا سدّ عيبًا قائمًا — لا مجرّد ثغرة: حفظ النتائج من
+         حساب فنّي كان يفشل عند تحديث الحالة، فلا يبلغ الطلب
+         `PENDING_REVIEW` ولا يظهر في قائمة الاعتماد.)
+
+         ⚠️ بقي على `admin`/`reception`: `discount` و`paidAmount` ضمن
+         `update` نفسها — نقل حقول المال إلى طفرات مخصّصة هو الدفعة
+         التالية. */
+      allow.groups(["quality", "tech", "doctor"]).to(["read"]),
     ]),
 
   /* ── سطر داخل الطلب: فحص واحد ونتيجته ───────────────────────── */
@@ -382,17 +391,17 @@ const schema = a.schema({
       /* ⚠️ كل مجموعة في قاعدة واحدة فقط: تكرار المجموعة نفسها في قاعدتين
          على النموذج نفسه يرفضه Amplify عند النشر
          (`@auth … staticGroup:admin … already exists`). */
-      allow.groups(["admin", "quality"]).to(["create", "read"]),
+      allow.groups(["admin", "quality"]).to(["read"]),
 
-      /* الكتابة لمن يعمل في النظام فعلًا — وهي **ليست حصانة**: `actor`
-         يأتي من العميل (`lib/amplify.ts`)، فمن يملك `create` يستطيع دسّ
-         سطر يشهد بما لم يقع — ولأن لا أحد يملك `update`/`delete` عمدًا،
-         السطر المدسوس لا يُصحَّح أبدًا.
+      /* **لا `create` لأي عميل.** كان `actor` يأتي من حمولة الطلب، فمن
+         يملك `create` يستطيع دسّ سطر يشهد بما لم يقع — ولأن لا أحد يملك
+         `update`/`delete` عمدًا، السطر المدسوس لا يُصحَّح أبدًا: سجل
+         التدقيق نفسه يصير أداة تلفيق بدل أن يكون دليلًا.
 
-         ⚠️ الإغلاق الكامل يحتاج نقل الكتابة إلى دالة تشتقّ `actor` من
-         `event.identity` لا من الطلب — كما تفعل `manage-staff`. مسجَّل في
-         «المرحلة التالية»، وتضييق المجموعات هنا يقلّل السطح ولا يزيله. */
-      allow.groups(["tech", "reception", "doctor"]).to(["create"]),
+         الكتابة الآن حصرًا عبر طفرة `writeAudit` في دالة `order-ops`،
+         تشتقّ `actor` من `event.identity` (رمز Cognito الموقَّع) و`at`
+         من ساعة الخادم. حمولة الطلب لا تحمل إلا الوصف: ماذا وقع، لا من
+         أوقعه ولا متى. */
     ]),
 
   /* ── بوابة تقرير المريض ──────────────────────────────────────
@@ -442,12 +451,91 @@ const schema = a.schema({
     .returns(a.json())
     .handler(a.handler.function(nextOrderNo))
     .authorization((allow) => [allow.groups(["admin", "reception"])]),
+
+  /* ── العمليات الحسّاسة على الطلب ──────────────────────────────
+     كلها في دالة `order-ops` الواحدة، تميّزها بـ`info.fieldName`.
+
+     ما تكسبه هذه الطفرات على `Order.update` المباشرة:
+     أ) **الهوية من الرمز لا من الحمولة** — `approvedBy` و`collectedBy`
+        و`actor` تُشتقّ من رمز Cognito الموقَّع، فلا يكتب أحد باسم غيره.
+     ب) **الشروط على الخادم** — الاكتمال ومبدأ أربع أعين والقيم الحرجة
+        كانت في الشاشة، والشاشة لا تحكم من يستدعي الـ API مباشرةً.
+     ج) **الحالة محسوبة من المخزَّن** لا مُرسَلة من مسودّة الشاشة.
+
+     و`day` (يوم المختبر المحلي) يرسله العميل لنفس سبب `stamp` أعلاه:
+     Lambda بتوقيت UTC والمختبر بتوقيته.                            */
+
+  /** سطر تدقيق — الوصف من العميل، والفاعل والوقت من الخادم. */
+  writeAudit: a
+    .mutation()
+    .arguments({
+      entity: a.string().required(),
+      entityId: a.string().required(),
+      action: a.string().required(),
+      summary: a.string(),
+      before: a.string(), // JSON مُسلسَل: لقطة ما قبل
+      after: a.string(), // JSON مُسلسَل: لقطة ما بعد
+      day: a.string(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(orderOps))
+    /* كل من يعمل في النظام يولّد أحداثًا. وهي ليست خطرًا بعد اليوم: من
+       يستدعيها لا يستطيع أن ينسب الحدث إلى غيره. */
+    .authorization((allow) => [
+      allow.groups(["admin", "quality", "tech", "reception", "doctor"]),
+    ]),
+
+  /** تسجيل سحب العيّنة — الوقت والساحب من الخادم. */
+  collectOrder: a
+    .mutation()
+    .arguments({ orderId: a.string().required(), day: a.string() })
+    .returns(a.json())
+    .handler(a.handler.function(orderOps))
+    .authorization((allow) => [allow.groups(["admin", "reception", "tech"])]),
+
+  /** تقديم حالة الطلب بعد حفظ نتائج — محسوبة من الفحوص المخزَّنة. */
+  progressOrder: a
+    .mutation()
+    .arguments({ orderId: a.string().required() })
+    .returns(a.json())
+    .handler(a.handler.function(orderOps))
+    .authorization((allow) => [allow.groups(["admin", "quality", "tech"])]),
+
+  /** اعتماد النتائج. `ack*` تأكيدات صريحة لحالتين تستوجبان تنبيهًا. */
+  approveOrder: a
+    .mutation()
+    .arguments({
+      orderId: a.string().required(),
+      // اعتماد نتيجة أدخلها المعتمِد نفسه — للمدير وحده وبتأكيد.
+      ackSelfEntered: a.boolean(),
+      // اعتماد رغم قيمة حرجة لم يُسجَّل إبلاغ الطبيب بها.
+      ackCriticals: a.boolean(),
+      day: a.string(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(orderOps))
+    .authorization((allow) => [allow.groups(["admin", "quality"])]),
+
+  /** مراجعة مرقّمة لتقرير معتمد — بسبب مكتوب يُطبع على التقرير. */
+  amendOrder: a
+    .mutation()
+    .arguments({
+      orderId: a.string().required(),
+      reason: a.string().required(),
+      day: a.string(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(orderOps))
+    .authorization((allow) => [allow.groups(["admin", "quality"])]),
 })
   // الدوال تقرأ الجداول وتكتب فيها بالنيابة عن المستخدم بعد التحقّق،
   // فتحتاج صلاحية على المخطط — وهي وحدها، لا العميل.
   .authorization((allow) => [
     allow.resource(getMyReport).to(["query"]),
     allow.resource(nextOrderNo).to(["query", "mutate"]),
+    /* `order-ops` تقرأ الطلب وفحوصه ثم تكتب الاعتماد وسطر التدقيق. وهي
+       المالك الوحيد لكتابة `AuditLog` بعد سحب `create` من كل العملاء. */
+    allow.resource(orderOps).to(["query", "mutate"]),
   ]);
 
 export type Schema = ClientSchema<typeof schema>;

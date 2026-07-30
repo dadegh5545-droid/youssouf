@@ -457,30 +457,115 @@ export async function voidPayment(
   return syncPaidAmount(payment.orderId, null);
 }
 
-/** كتابة سطر في سجل التدقيق — لا يُفشل العملية الأصلية إذا تعذّر. */
+/* ── العمليات الحسّاسة: على الخادم لا هنا ────────────────────────
+   الاعتماد والمراجعة وسحب العيّنة وتقديم الحالة وسطر التدقيق كلها
+   طفرات تنفّذها دالة `order-ops`. ما تكسبه على `Order.update` المباشرة:
+
+   أ) **الهوية من الرمز لا من الحمولة.** `approvedBy` و`collectedBy`
+      و`actor` تُشتقّ من رمز Cognito الموقَّع. قبل ذلك كانت تُرسل من هنا،
+      فمن يستدعي الـ API مباشرةً يكتب اعتمادًا باسم زميله.
+   ب) **الشروط على الخادم.** اكتمال النتائج ومبدأ أربع أعين والقيم الحرجة
+      كانت حواجز في هذه الصفحة وحدها — والصفحة لا تحكم من يتخطّاها.
+   ج) **الحالة محسوبة من المخزَّن** لا من مسودّة الشاشة.
+
+   الدالة **لا ترمي** عند رفض العملية: تعيد `{status:"ERROR", message}`
+   برسالة عربية جاهزة للعرض، لأن رفضًا مشروعًا («طلب ناقص لا يُعتمد») ليس
+   خطأً في النظام. `serverOp` تحوّله إلى استثناء لتلتقطه الشاشة كبقيّة
+   الأخطاء.                                                           */
+
+async function serverOp<T extends Record<string, unknown>>(
+  op: Promise<{ data?: unknown; errors?: readonly { message: string }[] }>
+): Promise<T> {
+  const res = await op;
+  // رفض AppSync (صلاحية، حقل غير معروف) يأتي هنا لا في الحمولة.
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  const parsed = parseJson<{ status?: string; message?: string } & T>(res.data);
+  if (!parsed) throw new Error("ردّ فارغ من الخادم — أعد المحاولة.");
+  if (parsed.status !== "OK") throw new Error(parsed.message || "رفض الخادم العملية.");
+  return parsed;
+}
+
+/** تسجيل سحب العيّنة — الوقت والساحب من الخادم. */
+export function collectOrder(orderId: string) {
+  return serverOp<{ collectedAt?: string; orderStatus?: string }>(
+    client.mutations.collectOrder({ orderId, day: localDay(new Date()) })
+  );
+}
+
+/**
+ * تقديم حالة الطلب بعد حفظ نتائج.
+ *
+ * الحالة تُحسب في الخادم من الفحوص المخزَّنة (`IN_PROGRESS` أو
+ * `PENDING_REVIEW`) ولا تُرسل من هنا: مسودّة الشاشة قد تخالف المخزَّن.
+ */
+export function progressOrder(orderId: string) {
+  return serverOp<{ orderStatus?: string; filled?: number; total?: number }>(
+    client.mutations.progressOrder({ orderId })
+  );
+}
+
+/**
+ * اعتماد النتائج.
+ *
+ * `ack` تأكيدان صريحان لحالتين يعترض عليهما الخادم: اعتماد نتيجة أدخلها
+ * المعتمِد نفسه (للمدير وحده)، والاعتماد رغم قيمة حرجة لم يُسجَّل إبلاغ
+ * الطبيب بها. بلا التأكيد يرفض الخادم — فالحاجز لم يعد في الشاشة.
+ */
+export function approveOrder(
+  orderId: string,
+  ack: { selfEntered?: boolean; criticals?: boolean } = {}
+) {
+  return serverOp<{
+    approvedAt?: string;
+    approvedBy?: string;
+    count?: number;
+    selfEntered?: number;
+  }>(
+    client.mutations.approveOrder({
+      orderId,
+      ackSelfEntered: !!ack.selfEntered,
+      ackCriticals: !!ack.criticals,
+      day: localDay(new Date()),
+    })
+  );
+}
+
+/** مراجعة مرقّمة لتقرير معتمد — بسبب مكتوب يُطبع على التقرير. */
+export function amendOrder(orderId: string, reason: string) {
+  return serverOp<{ reportRevision?: number; amendedBy?: string }>(
+    client.mutations.amendOrder({ orderId, reason, day: localDay(new Date()) })
+  );
+}
+
+/**
+ * كتابة سطر في سجل التدقيق — لا يُفشل العملية الأصلية إذا تعذّر.
+ *
+ * لا `actor` هنا عن قصد: يشتقّه الخادم من رمز Cognito، وكذلك `at`. كان
+ * يُرسَل من العميل، فمن يملك `create` على الجدول يدسّ سطرًا يشهد بما لم
+ * يقع — ولأن لا أحد يملك `update`/`delete` عمدًا، السطر المدسوس لا
+ * يُصحَّح أبدًا. الحمولة الآن تصف الحدث ولا تنسبه.
+ *
+ * و`day` يبقى من العميل: يوم المختبر المحلي، وLambda تعمل بتوقيت UTC.
+ */
 export async function audit(entry: {
   entity: string;
   entityId: string;
   action: string;
-  actor: string;
   summary?: string;
   before?: unknown;
   after?: unknown;
 }) {
   try {
-    const now = new Date();
-    await client.models.AuditLog.create({
+    const { errors } = await client.mutations.writeAudit({
       entity: entry.entity,
       entityId: entry.entityId,
       action: entry.action,
-      actor: entry.actor || "unknown",
       summary: entry.summary,
       before: entry.before ? JSON.stringify(entry.before) : undefined,
       after: entry.after ? JSON.stringify(entry.after) : undefined,
-      // مفتاحا الفهرس: `day` مفتاح التقسيم و`at` مفتاح الفرز.
-      day: localDay(now),
-      at: now.toISOString(),
+      day: localDay(new Date()),
     });
+    if (errors?.length) throw new Error(errors[0].message);
   } catch (e) {
     console.warn("audit log failed", e);
   }

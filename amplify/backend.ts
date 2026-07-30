@@ -5,6 +5,7 @@ import { data } from './data/resource.js';
 import { getMyReport } from './functions/get-my-report/resource.js';
 import { manageStaff } from './functions/manage-staff/resource.js';
 import { nextOrderNo } from './functions/next-order-no/resource.js';
+import { orderOps } from './functions/order-ops/resource.js';
 
 const backend = defineBackend({
   auth,
@@ -12,6 +13,7 @@ const backend = defineBackend({
   getMyReport,
   manageStaff,
   nextOrderNo,
+  orderOps,
 });
 
 /* ── صلاحية إدارة الموظفين ───────────────────────────────────────
@@ -43,3 +45,22 @@ backend.manageStaff.resources.lambda.addToRolePolicy(
 
 // معرّف المجمّع لا يُعرف قبل النشر، فيُحقن متغيّر بيئة بدل كتابته في الكود.
 backend.manageStaff.addEnvironment('USER_POOL_ID', userPool.userPoolId);
+
+/* ── هوية المعتمِد في العمليات الحسّاسة ─────────────────────────────
+   دالة `order-ops` تشتقّ الفاعل من `event.identity`، وهو رمز **الوصول**
+   الذي يرسله عميل Amplify في وضع `userPool`: حمولته تحمل `username`
+   و`sub` و`cognito:groups` ولا تحمل البريد ولا الاسم. فتُقرأ السمتان من
+   Cognito — `AdminGetUser` وحدها، بلا أي صلاحية كتابة.
+
+   ولماذا البريد أصلًا: سطور `enteredBy` وسجل التدقيق القائمة كلها كُتبت
+   بالبريد، فلو كتب الخادم `username` لصار «من أدخل النتيجة» و«من اعتمدها»
+   لا يُقارَنان — فيسقط مبدأ أربع أعين — وانقطع سجل التدقيق عن تاريخه.
+   والاسم المعروض هو ما يُطبع على التقرير تحت «اعتمدها». */
+backend.orderOps.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    actions: ['cognito-idp:AdminGetUser'],
+    resources: [userPool.userPoolArn],
+  })
+);
+
+backend.orderOps.addEnvironment('USER_POOL_ID', userPool.userPoolId);

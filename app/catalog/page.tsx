@@ -217,7 +217,6 @@ export default function CatalogPage() {
         entity: "LabTest",
         entityId: t.id,
         action: "PRICE_CHANGED",
-        actor: session.actor,
         summary: `${t.code}: ${fmtMoney(t.price)} ← ${fmtMoney(value)}`,
         before: { price: t.price },
         after: { price: value },
@@ -297,7 +296,6 @@ export default function CatalogPage() {
         entity: "LabTest",
         entityId: res.data?.id ?? draft.id ?? code,
         action: draft.id ? "TEST_UPDATED" : "TEST_CREATED",
-        actor: session.actor,
         summary: `${code} — ${nameAr}`,
         before: before && {
           nameAr: before.nameAr,
@@ -362,7 +360,6 @@ export default function CatalogPage() {
         entity: "LabTest",
         entityId: t.id,
         action: "RANGES_APPROVED",
-        actor: session.actor,
         summary: `اعتماد المديات المرجعية للفحص ${t.code} — ${t.nameAr}`,
         after: {
           ranges: t.ranges,

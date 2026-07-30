@@ -339,7 +339,6 @@ function PaymentMigration() {
         entity: "Order",
         entityId: "MIGRATION",
         action: "PAYMENTS_MIGRATED",
-        actor: session.actor,
         summary: `ترحيل ${done} رصيدًا سابقًا إلى سجل الدفعات`,
       });
 
@@ -470,7 +469,6 @@ function DayBackfill() {
         entity: "Order",
         entityId: "BACKFILL",
         action: "DAY_BACKFILLED",
-        actor: session.actor,
         summary: `ملء رجعي للحقل day على ${done} طلب${
           skipped ? ` · ${skipped} تُخطّي لتعذّر قراءة تاريخ إنشائه` : ""
         }`,

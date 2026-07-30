@@ -113,7 +113,6 @@ export default function StaffPage() {
         entity: "Staff",
         entityId: user.username,
         action: `STAFF_${action}`,
-        actor: session.actor,
         summary: summary ?? `${action} — ${user.email}`,
         after: { email: user.email, group },
       });

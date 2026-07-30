@@ -137,7 +137,6 @@ export default function PatientsPage() {
         entity: "Patient",
         entityId: data.id,
         action: "PATIENT_CREATED",
-        actor: session.actor,
         summary: `تسجيل مريض ${data.fullName} (${mrn})`,
       });
     }
@@ -189,7 +188,6 @@ export default function PatientsPage() {
       entity: "Patient",
       entityId: id,
       action: "PATIENT_UPDATED",
-      actor: session.actor,
       summary: `تعديل ملف ${before.mrn}: ${changedKeys.join("، ")}`,
       before: Object.fromEntries(changedKeys.map((k) => [k, before[k] ?? null])),
       after: Object.fromEntries(changedKeys.map((k) => [k, next[k]])),
