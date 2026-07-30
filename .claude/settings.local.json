@@ -19,7 +19,8 @@
       "PowerShell($id = aws sts get-caller-identity --output json 2>$null; if \\($LASTEXITCODE -eq 0\\) { \"OK: $id\" } else { \"FAIL exit=$LASTEXITCODE\"; if \\(Test-Path \"$env:USERPROFILE\\\\.aws\"\\) { Get-ChildItem \"$env:USERPROFILE\\\\.aws\" -Force | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize } else { \"no .aws\" } })",
       "PowerShell(cd \"c:\\\\Users\\\\DELL\\\\Desktop\\\\youssouf\\\\youssouf\"; $o = Get-Content amplify_outputs.json -Raw | ConvertFrom-Json; \"user_pool_id : $\\($o.auth.user_pool_id\\)\"; \"region       : $\\($o.auth.aws_region\\)\"; \"graphql      : $\\($o.data.url\\)\"; \"models       : $\\($o.data.model_introspection.models.PSObject.Properties.Name -join ', '\\)\")",
       "PowerShell(\"region: \" + \\(aws configure get region\\); \"output: \" + \\(aws configure get output\\))",
-      "PowerShell(aws cloudformation describe-stacks --stack-name CDKToolkit --region us-east-1 --query \"Stacks[0].StackStatus\" --output text 2>$null; \"exit=$LASTEXITCODE\")"
+      "PowerShell(aws cloudformation describe-stacks --stack-name CDKToolkit --region us-east-1 --query \"Stacks[0].StackStatus\" --output text 2>$null; \"exit=$LASTEXITCODE\")",
+      "Bash(aws dynamodb *)"
     ]
   }
 }
